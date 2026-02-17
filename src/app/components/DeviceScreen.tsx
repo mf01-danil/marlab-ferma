@@ -15,16 +15,16 @@ function parseAnnexBNALUs(data: Uint8Array): Uint8Array[] {
   while (i < data.length) {
     // Find start code (0x000001 or 0x00000001)
     let startCodeLen = 0;
-    if (i + 3 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
-      startCodeLen = 3;
-    } else if (
-      i + 4 < data.length &&
+    if (
+      i + 4 <= data.length &&
       data[i] === 0 &&
       data[i + 1] === 0 &&
       data[i + 2] === 0 &&
       data[i + 3] === 1
     ) {
       startCodeLen = 4;
+    } else if (i + 3 <= data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      startCodeLen = 3;
     }
 
     if (startCodeLen === 0) {
@@ -36,14 +36,21 @@ function parseAnnexBNALUs(data: Uint8Array): Uint8Array[] {
 
     // Find next start code
     let naluEnd = data.length;
-    for (let j = naluStart + 1; j < data.length - 2; j++) {
-      if (data[j] === 0 && data[j + 1] === 0 && (data[j + 2] === 1 || (data[j + 2] === 0 && j + 3 < data.length && data[j + 3] === 1))) {
+    for (let j = naluStart; j < data.length - 2; j++) {
+      if (
+        data[j] === 0 &&
+        data[j + 1] === 0 &&
+        (data[j + 2] === 1 ||
+          (data[j + 2] === 0 && j + 3 < data.length && data[j + 3] === 1))
+      ) {
         naluEnd = j;
         break;
       }
     }
 
-    nalus.push(data.slice(naluStart, naluEnd));
+    if (naluStart < naluEnd) {
+      nalus.push(data.slice(naluStart, naluEnd));
+    }
     i = naluEnd;
   }
 
@@ -64,8 +71,7 @@ function buildAvcC(configData: Uint8Array): Uint8Array {
   }
 
   if (spsList.length === 0 || ppsList.length === 0) {
-    console.error("[avcC] No SPS/PPS found in config data");
-    return configData; // fallback
+    throw new Error(`No SPS/PPS found: ${nalus.length} NALUs, types=[${nalus.map(n => n[0] & 0x1f).join(',')}]`);
   }
 
   const sps = spsList[0];
@@ -136,6 +142,12 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
   const decoderRef = useRef<VideoDecoder | null>(null);
   const [status, setStatus] = useState<string>("Connecting...");
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [debugLines, setDebugLines] = useState<string[]>([]);
+
+  const addDebug = useCallback((line: string) => {
+    console.log(`[DeviceScreen] ${line}`);
+    setDebugLines((prev) => [...prev.slice(-19), line]);
+  }, []);
 
   const initDecoder = useCallback(() => {
     if (decoderRef.current?.state !== "closed") {
@@ -170,14 +182,17 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
   }, []);
 
   useEffect(() => {
+    addDebug(`Connecting to ${wsUrl}?serial=${serial}`);
     const ws = new WebSocket(`${wsUrl}?serial=${encodeURIComponent(serial)}`);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
     let decoder: VideoDecoder | null = null;
     let configured = false;
+    let frameCount = 0;
 
     ws.onopen = () => {
+      addDebug("WebSocket connected");
       setStatus("Connected, waiting for video...");
     };
 
@@ -189,8 +204,10 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
           if (msg.type === "metadata") {
             setDimensions({ width: msg.width, height: msg.height });
             setStatus("Receiving video...");
+            addDebug(`Metadata: ${msg.width}x${msg.height}`);
           } else if (msg.type === "error") {
             setStatus(`Error: ${msg.message}`);
+            addDebug(`Server error: ${msg.message}`);
           }
         } catch {
           // ignore
@@ -200,7 +217,10 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
 
       // Binary messages (video frames)
       const data = new Uint8Array(event.data);
-      if (data.length < 13) return;
+      if (data.length < 13) {
+        addDebug(`Short binary msg: ${data.length} bytes`);
+        return;
+      }
 
       // Parse header: type (1) + pts (8) + size (4)
       const frameType = data[0]; // 0=data, 1=config, 2=keyframe
@@ -209,28 +229,53 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
       const size = view.getUint32(9);
 
       const frameData = data.slice(13, 13 + size);
+      frameCount++;
+
+      if (frameCount <= 5) {
+        addDebug(`Frame#${frameCount}: type=${frameType} size=${size} pts=${pts} total=${data.length}`);
+      }
 
       if (frameType === 1) {
         // Configuration packet (SPS/PPS) — convert from Annex B to avcC
-        if (!decoder || decoder.state === "closed") {
-          decoder = initDecoder();
+        try {
+          if (!decoder || decoder.state === "closed") {
+            decoder = initDecoder();
+          }
+
+          const hexDump = Array.from(frameData.slice(0, 40))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(" ");
+          addDebug(`Config hex: ${hexDump}`);
+
+          const nalus = parseAnnexBNALUs(frameData);
+          addDebug(
+            `NALUs: ${nalus.length} [${nalus.map((n) => `type=${n[0] & 0x1f},len=${n.length}`).join(" ")}]`
+          );
+
+          const avcC = buildAvcC(frameData);
+          addDebug(`avcC: ${avcC.length} bytes`);
+
+          const sps = nalus.find((n) => (n[0] & 0x1f) === 7);
+          const codecStr = sps
+            ? `avc1.${[sps[1], sps[2], sps[3]].map((b) => b.toString(16).padStart(2, "0")).join("")}`
+            : "avc1.640028";
+
+          addDebug(`Codec: ${codecStr}, configuring decoder...`);
+
+          decoder.configure({
+            codec: codecStr,
+            description: avcC,
+            optimizeForLatency: true,
+          });
+
+          configured = true;
+          addDebug(`Decoder configured! state=${decoder.state}`);
+          setStatus("Streaming");
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          addDebug(`CONFIG ERROR: ${msg}`);
+          setStatus(`Config error: ${msg}`);
         }
-
-        const avcC = buildAvcC(frameData);
-        const sps = parseAnnexBNALUs(frameData).find((n) => (n[0] & 0x1f) === 7);
-        const codecStr = sps
-          ? `avc1.${[sps[1], sps[2], sps[3]].map((b) => b.toString(16).padStart(2, "0")).join("")}`
-          : "avc1.640028";
-
-        console.log(`[decoder] Configuring codec=${codecStr}, avcC size=${avcC.length}`);
-
-        decoder.configure({
-          codec: codecStr,
-          description: avcC,
-          optimizeForLatency: true,
-        });
-        configured = true;
-        setStatus("Streaming");
         return;
       }
 
@@ -246,15 +291,19 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
         });
         decoder.decode(chunk);
       } catch (err) {
-        console.warn("[decoder] Decode error:", err);
+        if (frameCount <= 10) {
+          addDebug(`Decode error: ${err instanceof Error ? err.message : err}`);
+        }
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
+      addDebug(`WebSocket closed: code=${e.code} reason=${e.reason}`);
       setStatus("Disconnected");
     };
 
     ws.onerror = () => {
+      addDebug("WebSocket error");
       setStatus("Connection failed");
     };
 
@@ -264,7 +313,7 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
         decoder.close();
       }
     };
-  }, [serial, wsUrl, initDecoder]);
+  }, [serial, wsUrl, initDecoder, addDebug]);
 
   // Input handlers
   const getDeviceCoords = (
@@ -337,6 +386,28 @@ export default function DeviceScreen({ serial, wsUrl }: Props) {
         }}
         onContextMenu={(e) => e.preventDefault()}
       />
+      {debugLines.length > 0 && (
+        <details style={{ marginTop: 16 }} open>
+          <summary style={{ fontSize: 12, color: "#999", cursor: "pointer" }}>
+            Debug log ({debugLines.length})
+          </summary>
+          <pre
+            style={{
+              fontSize: 11,
+              background: "#111",
+              color: "#0f0",
+              padding: 12,
+              borderRadius: 4,
+              maxHeight: 300,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}
+          >
+            {debugLines.join("\n")}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }

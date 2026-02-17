@@ -1,10 +1,10 @@
 "use client";
 
-import { use } from "react";
+import { use, useState, useEffect } from "react";
 import Link from "next/link";
 import DeviceScreen from "../../components/DeviceScreen";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001";
+const DEFAULT_API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export default function DevicePage({
   params,
@@ -13,6 +13,18 @@ export default function DevicePage({
 }) {
   const { serial } = use(params);
   const decodedSerial = decodeURIComponent(serial);
+
+  const [wsUrl, setWsUrl] = useState("");
+
+  useEffect(() => {
+    const apiUrl =
+      (typeof window !== "undefined" && localStorage.getItem("marlab_api_url")) ||
+      DEFAULT_API_URL;
+    // Derive WS URL: http→ws, https→wss
+    setWsUrl(apiUrl.replace(/^http/, "ws"));
+  }, []);
+
+  if (!wsUrl) return null; // wait for client-side URL resolution
 
   return (
     <main style={{ fontFamily: "system-ui", padding: 32, maxWidth: 720 }}>
@@ -34,7 +46,7 @@ export default function DevicePage({
         Click on the screen to interact with the device
       </p>
 
-      <DeviceScreen serial={decodedSerial} wsUrl={WS_URL} />
+      <DeviceScreen serial={decodedSerial} wsUrl={wsUrl} />
     </main>
   );
 }

@@ -88,8 +88,12 @@ wss.on("connection", (ws, req) => {
       }
     });
 
+    let frameCount = 0;
     scrcpy.on("frame", (frame: VideoFrame) => {
-      // Send frame header as JSON, then binary data
+      frameCount++;
+      if (frameCount <= 5) {
+        console.log(`[frame#${frameCount}] config=${frame.isConfig} key=${frame.isKeyframe} size=${frame.data.length} pts=${frame.pts}`);
+      }
       const header = Buffer.alloc(13);
       header.writeUInt8(frame.isConfig ? 1 : frame.isKeyframe ? 2 : 0, 0);
       header.writeDoubleBE(Number(frame.pts), 1);
