@@ -4,8 +4,6 @@ import { use, useState, useEffect } from "react";
 import Link from "next/link";
 import DeviceScreen from "../../components/DeviceScreen";
 
-const DEFAULT_API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
 export default function DevicePage({
   params,
 }: {
@@ -17,14 +15,12 @@ export default function DevicePage({
   const [wsUrl, setWsUrl] = useState("");
 
   useEffect(() => {
-    const apiUrl =
-      (typeof window !== "undefined" && localStorage.getItem("marlab_api_url")) ||
-      DEFAULT_API_URL;
-    // Derive WS URL: http→ws, https→wss
-    setWsUrl(apiUrl.replace(/^http/, "ws"));
+    // Same host as frontend, port 3001, ws/wss matches http/https
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    setWsUrl(`${protocol}//${window.location.hostname}:3001`);
   }, []);
 
-  if (!wsUrl) return null; // wait for client-side URL resolution
+  if (!wsUrl) return null;
 
   return (
     <main style={{ fontFamily: "system-ui", padding: 32, maxWidth: 720 }}>

@@ -10,13 +10,12 @@ interface Device {
   product?: string;
 }
 
-const DEFAULT_API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
-
-function getSavedApiUrl(): string {
+function getApiUrl(): string {
   if (typeof window !== "undefined") {
-    return localStorage.getItem("marlab_api_url") || DEFAULT_API_URL;
+    // Same host as frontend, port 3001
+    return `${window.location.protocol}//${window.location.hostname}:3001`;
   }
-  return DEFAULT_API_URL;
+  return "http://localhost:3001";
 }
 
 export default function Home() {
@@ -24,15 +23,10 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
-  const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
-  const [showSettings, setShowSettings] = useState(false);
-  const [settingsInput, setSettingsInput] = useState("");
+  const [apiUrl, setApiUrl] = useState("http://localhost:3001");
 
-  // Load saved URL on mount
   useEffect(() => {
-    const saved = getSavedApiUrl();
-    setApiUrl(saved);
-    setSettingsInput(saved);
+    setApiUrl(getApiUrl());
   }, []);
 
   const fetchDevices = useCallback(async () => {
@@ -56,79 +50,9 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [fetchDevices]);
 
-  const saveSettings = () => {
-    const url = settingsInput.replace(/\/+$/, ""); // trim trailing slashes
-    localStorage.setItem("marlab_api_url", url);
-    setApiUrl(url);
-    setShowSettings(false);
-  };
-
   return (
     <main style={{ fontFamily: "system-ui", padding: 32, maxWidth: 960 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <h1 style={{ margin: 0 }}>MarLab Ferma</h1>
-        <button
-          onClick={() => { setShowSettings(!showSettings); setSettingsInput(apiUrl); }}
-          style={{
-            padding: "4px 10px",
-            fontSize: 12,
-            border: "1px solid #ddd",
-            borderRadius: 6,
-            background: "#fff",
-            cursor: "pointer",
-            color: "#888",
-          }}
-        >
-          Settings
-        </button>
-      </div>
-
-      {showSettings && (
-        <div
-          style={{
-            padding: 16,
-            background: "#f9f9f9",
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            marginBottom: 16,
-          }}
-        >
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Backend URL</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              type="text"
-              value={settingsInput}
-              onChange={(e) => setSettingsInput(e.target.value)}
-              style={{
-                flex: 1,
-                padding: "6px 10px",
-                border: "1px solid #ccc",
-                borderRadius: 6,
-                fontSize: 13,
-              }}
-              placeholder="https://your-tunnel.trycloudflare.com"
-            />
-            <button
-              onClick={saveSettings}
-              style={{
-                padding: "6px 16px",
-                fontSize: 13,
-                border: "1px solid #2a2",
-                borderRadius: 6,
-                background: "#2a2",
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Save
-            </button>
-          </div>
-          <div style={{ fontSize: 11, color: "#999", marginTop: 6 }}>
-            Current: {apiUrl}
-          </div>
-        </div>
-      )}
-
+      <h1 style={{ marginBottom: 8 }}>MarLab Ferma</h1>
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
         <p style={{ color: "#666", margin: 0 }}>
           Phone Farm Management — {devices.filter((d) => d.status === "device").length} online / {devices.length} total
