@@ -198,22 +198,31 @@ export class AdbTransport implements DeviceTransport {
 
     // Open WiFi settings
     await shell(this.serial, "am start -a android.settings.WIFI_SETTINGS", 10000);
-    await delay(3000);
+    await delay(4000);
 
-    // Dump UI and find the SSID
-    let xml = await this.dumpUI(DUMP);
-    let ssidPos = findNodeByText(xml, ssid);
-
-    if (!ssidPos) {
-      // Scroll down to find the network
-      await shell(this.serial, "input swipe 360 1000 360 400 500", 5000);
-      await delay(1500);
+    // Poll for SSID to appear (WiFi scan may take time)
+    let xml: string;
+    let ssidPos: ReturnType<typeof findNodeByText> = null;
+    const scanStart = Date.now();
+    while (Date.now() - scanStart < 60000) {
       xml = await this.dumpUI(DUMP);
       ssidPos = findNodeByText(xml, ssid);
+      if (ssidPos) break;
+
+      // Scroll down to find the network
+      await shell(this.serial, "input swipe 360 1000 360 400 500", 5000);
+      await delay(2000);
+      xml = await this.dumpUI(DUMP);
+      ssidPos = findNodeByText(xml, ssid);
+      if (ssidPos) break;
+
+      // Scroll back up and wait for scan refresh
+      await shell(this.serial, "input swipe 360 400 360 1000 500", 5000);
+      await delay(5000);
     }
 
     if (!ssidPos) {
-      throw new Error(`WiFi network "${ssid}" not found on screen`);
+      throw new Error(`WiFi network "${ssid}" not found after 60s`);
     }
 
     // Tap on the network
