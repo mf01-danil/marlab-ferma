@@ -51,6 +51,13 @@ export async function push(
   await adb(["-s", serial, "push", localPath, remotePath], 60000);
 }
 
+export async function install(
+  serial: string,
+  localPath: string
+): Promise<string> {
+  return adb(["-s", serial, "install", "-r", "-g", localPath], 120000);
+}
+
 export async function shell(serial: string, command: string): Promise<string> {
   return adb(["-s", serial, "shell", command]);
 }

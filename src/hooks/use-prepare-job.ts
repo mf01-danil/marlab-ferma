@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getApiUrl } from "@/lib/api";
 
-export type FileStatus = "pending" | "uploading" | "loaded" | "failed";
+export type FileStatus = "pending" | "uploading" | "loaded" | "installing" | "installed" | "failed";
 export type DeviceJobStatus = "pending" | "preparing" | "prepared" | "failed";
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
@@ -94,6 +94,28 @@ export function usePrepareJob() {
             if (dp) {
               const files = dp.files.map((f) =>
                 f.name === data.fileName ? { ...f, status: "loaded" as const } : f
+              );
+              devices.set(data.serial, { ...dp, files });
+            }
+            return { ...prev, devices };
+          }
+
+          case "file:installing": {
+            const dp = devices.get(data.serial);
+            if (dp) {
+              const files = dp.files.map((f) =>
+                f.name === data.fileName ? { ...f, status: "installing" as const } : f
+              );
+              devices.set(data.serial, { ...dp, files });
+            }
+            return { ...prev, devices };
+          }
+
+          case "file:installed": {
+            const dp = devices.get(data.serial);
+            if (dp) {
+              const files = dp.files.map((f) =>
+                f.name === data.fileName ? { ...f, status: "installed" as const } : f
               );
               devices.set(data.serial, { ...dp, files });
             }

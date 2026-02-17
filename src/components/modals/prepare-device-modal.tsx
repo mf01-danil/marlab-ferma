@@ -8,6 +8,8 @@ import {
   XCircle,
   ChevronDown,
   ChevronRight,
+  Download,
+  PackageCheck,
 } from "lucide-react";
 import {
   Dialog,
@@ -33,8 +35,12 @@ interface PrepareDeviceModalProps {
 
 function FileStatusIcon({ status }: { status: FileProgress["status"] }) {
   switch (status) {
+    case "installed":
+      return <PackageCheck className="size-3.5 text-status-online" />;
     case "loaded":
       return <CheckCircle2 className="size-3.5 text-status-online" />;
+    case "installing":
+      return <Download className="size-3.5 text-primary animate-pulse" />;
     case "uploading":
       return <Loader2 className="size-3.5 text-primary animate-spin" />;
     case "failed":
@@ -128,9 +134,9 @@ export function PrepareDeviceModal({
           <DialogTitle>Prepare Devices</DialogTitle>
           <DialogDescription>
             {!jobStatus
-              ? `Push files to ${serials.length} device${serials.length > 1 ? "s" : ""}.`
+              ? `Push files & install APKs on ${serials.length} device${serials.length > 1 ? "s" : ""}.`
               : isRunning
-                ? "Pushing files to devices..."
+                ? "Pushing files & installing APKs..."
                 : jobStatus === "completed"
                   ? `All ${prepared} device${prepared > 1 ? "s" : ""} prepared successfully.`
                   : `Finished with ${failed} error${failed > 1 ? "s" : ""}.`}

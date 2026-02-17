@@ -78,6 +78,20 @@ class JobStore extends EventEmitter {
     this.emitEvent({ type: "file:loaded", jobId, serial, fileName });
   }
 
+  fileInstalling(jobId: string, serial: string, fileName: string): void {
+    const fp = this.getFileProgress(jobId, serial, fileName);
+    if (!fp) return;
+    fp.status = "installing";
+    this.emitEvent({ type: "file:installing", jobId, serial, fileName });
+  }
+
+  fileInstalled(jobId: string, serial: string, fileName: string): void {
+    const fp = this.getFileProgress(jobId, serial, fileName);
+    if (!fp) return;
+    fp.status = "installed";
+    this.emitEvent({ type: "file:installed", jobId, serial, fileName });
+  }
+
   fileFailed(jobId: string, serial: string, fileName: string, error: string): void {
     const fp = this.getFileProgress(jobId, serial, fileName);
     if (!fp) return;

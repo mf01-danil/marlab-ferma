@@ -3,7 +3,7 @@ import { jobStore } from "./job-store";
 import { loadManifest, getBundleFilePath } from "./manifest";
 import { createTransport } from "./transport";
 
-const DEVICE_TIMEOUT_MS = 120_000; // 2 minutes per device
+const DEVICE_TIMEOUT_MS = 300_000; // 5 minutes per device (push + install takes time)
 
 async function prepareDevice(jobId: string, serial: string): Promise<void> {
   const manifest = loadManifest();
@@ -27,7 +27,7 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
     return;
   }
 
-  // Push each file
+  // Phase 1: Push all files
   for (const file of manifest.files) {
     const localPath = getBundleFilePath(file.localPath);
     const remotePath = join(manifest.targetDir, file.name).replace(/\\/g, "/");
@@ -40,6 +40,23 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
     } catch (err) {
       jobStore.fileFailed(jobId, serial, file.name, (err as Error).message);
       jobStore.deviceFailed(jobId, serial, `Failed to push ${file.name}: ${(err as Error).message}`);
+      return;
+    }
+  }
+
+  // Phase 2: Install APKs
+  const apks = manifest.files.filter((f) => f.action === "install");
+  for (const file of apks) {
+    const localPath = getBundleFilePath(file.localPath);
+
+    jobStore.fileInstalling(jobId, serial, file.name);
+
+    try {
+      await transport.installApk(localPath);
+      jobStore.fileInstalled(jobId, serial, file.name);
+    } catch (err) {
+      jobStore.fileFailed(jobId, serial, file.name, `Install failed: ${(err as Error).message}`);
+      jobStore.deviceFailed(jobId, serial, `Failed to install ${file.name}: ${(err as Error).message}`);
       return;
     }
   }

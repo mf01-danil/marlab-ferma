@@ -1,8 +1,9 @@
-import { push, shell } from "../adb";
+import { push, shell, install } from "../adb";
 
 export interface DeviceTransport {
   ensureDir(remotePath: string): Promise<void>;
   pushFile(localPath: string, remotePath: string): Promise<void>;
+  installApk(localPath: string): Promise<void>;
   checkOnline(): Promise<boolean>;
 }
 
@@ -15,6 +16,10 @@ export class AdbTransport implements DeviceTransport {
 
   async pushFile(localPath: string, remotePath: string): Promise<void> {
     await push(this.serial, localPath, remotePath);
+  }
+
+  async installApk(localPath: string): Promise<void> {
+    await install(this.serial, localPath);
   }
 
   async checkOnline(): Promise<boolean> {
@@ -43,6 +48,10 @@ export class MockTransport implements DeviceTransport {
     if (Math.random() < this.failRate) {
       throw new Error(`Mock push failed for ${this.serial}`);
     }
+  }
+
+  async installApk(_localPath: string): Promise<void> {
+    await this.delay();
   }
 
   async checkOnline(): Promise<boolean> {

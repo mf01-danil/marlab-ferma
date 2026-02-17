@@ -3,7 +3,7 @@ import { z } from "zod";
 // --- Job statuses ---
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 export type DeviceJobStatus = "pending" | "preparing" | "prepared" | "failed";
-export type FileStatus = "pending" | "uploading" | "loaded" | "failed";
+export type FileStatus = "pending" | "uploading" | "loaded" | "installing" | "installed" | "failed";
 
 // --- File progress ---
 export interface FileProgress {
@@ -39,6 +39,8 @@ export type PrepareEvent =
   | { type: "device:started"; jobId: string; serial: string }
   | { type: "file:uploading"; jobId: string; serial: string; fileName: string }
   | { type: "file:loaded"; jobId: string; serial: string; fileName: string }
+  | { type: "file:installing"; jobId: string; serial: string; fileName: string }
+  | { type: "file:installed"; jobId: string; serial: string; fileName: string }
   | { type: "file:failed"; jobId: string; serial: string; fileName: string; error: string }
   | { type: "device:prepared"; jobId: string; serial: string }
   | { type: "device:failed"; jobId: string; serial: string; error: string }
@@ -53,9 +55,12 @@ export const PrepareRequestSchema = z.object({
 export type PrepareRequest = z.infer<typeof PrepareRequestSchema>;
 
 // --- Bundle manifest ---
+export type BundleFileAction = "push" | "install";
+
 export interface BundleFile {
   name: string;
   localPath: string;
+  action?: BundleFileAction;
   description?: string;
 }
 
