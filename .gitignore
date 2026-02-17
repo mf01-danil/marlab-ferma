@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# prepare bundle binaries (APKs, ZIPs)
+server/assets/prepare-bundle/files/

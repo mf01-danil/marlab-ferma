@@ -1,9 +1,9 @@
 import { execFile } from "child_process";
 import { Device } from "./types";
 
-function adb(args: string[]): Promise<string> {
+function adb(args: string[], timeoutMs = 10000): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile("adb", args, { timeout: 10000 }, (err, stdout, stderr) => {
+    execFile("adb", args, { timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(`adb ${args.join(" ")} failed: ${stderr || err.message}`));
         return;
@@ -39,7 +39,8 @@ export async function listDevices(): Promise<Device[]> {
     devices.push({ serial, status, model, product, transport });
   }
 
-  return devices;
+  // Only return USB-connected devices (filter out WiFi ADB pairs like 192.168.x.x:5555)
+  return devices.filter((d) => !d.serial.includes(":"));
 }
 
 export async function push(
@@ -47,7 +48,7 @@ export async function push(
   localPath: string,
   remotePath: string
 ): Promise<void> {
-  await adb(["-s", serial, "push", localPath, remotePath]);
+  await adb(["-s", serial, "push", localPath, remotePath], 60000);
 }
 
 export async function shell(serial: string, command: string): Promise<string> {

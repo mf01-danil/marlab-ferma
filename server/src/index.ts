@@ -6,12 +6,16 @@ import { URL } from "url";
 import { listDevices } from "./adb";
 import { ScrcpyClient } from "./scrcpy-client";
 import { InputMessage, VideoFrame, VideoMetadata } from "./types";
+import { prepareRouter } from "./prepare/routes";
 
 const PORT = Number(process.env.PORT) || 3001;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Prepare routes
+app.use("/api/prepare", prepareRouter);
 
 // REST: List devices
 app.get("/api/devices", async (_req, res) => {
