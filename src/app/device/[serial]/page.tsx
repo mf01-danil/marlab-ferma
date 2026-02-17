@@ -15,9 +15,15 @@ export default function DevicePage({
   const [wsUrl, setWsUrl] = useState("");
 
   useEffect(() => {
-    // Same host as frontend, port 3001, ws/wss matches http/https
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    setWsUrl(`${protocol}//${window.location.hostname}:3001`);
+    const saved = localStorage.getItem("marlab_api_url");
+    let base: string;
+    if (saved) {
+      base = saved;
+    } else {
+      base = `${window.location.protocol}//${window.location.hostname}:3001`;
+    }
+    // Derive WS URL: http→ws, https→wss
+    setWsUrl(base.replace(/^http/, "ws"));
   }, []);
 
   if (!wsUrl) return null;
