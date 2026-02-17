@@ -6,6 +6,16 @@ import { getApiUrl } from "@/lib/api";
 export type FileStatus = "pending" | "uploading" | "loaded" | "installing" | "installed" | "failed";
 export type DeviceJobStatus = "pending" | "preparing" | "prepared" | "failed";
 export type JobStatus = "queued" | "running" | "completed" | "failed";
+export type SetupStep =
+  | "checking-magisk"
+  | "connecting-wifi"
+  | "waiting-internet"
+  | "checking-root"
+  | "awaiting-magisk-update"
+  | "enabling-zygisk"
+  | "installing-modules"
+  | "rebooting"
+  | "waiting-boot";
 
 export interface FileProgress {
   name: string;
@@ -18,12 +28,24 @@ export interface DeviceProgress {
   status: DeviceJobStatus;
   files: FileProgress[];
   error?: string;
+  setupStep?: SetupStep;
+  setupMessage?: string;
+}
+
+export type LogLevel = "info" | "success" | "error" | "warn";
+
+export interface LogEntry {
+  time: number;
+  serial?: string;
+  message: string;
+  level: LogLevel;
 }
 
 export interface PrepareJobState {
   jobId: string | null;
   jobStatus: JobStatus | null;
   devices: Map<string, DeviceProgress>;
+  logs: LogEntry[];
   error: string | null;
 }
 
@@ -32,6 +54,7 @@ export function usePrepareJob() {
     jobId: null,
     jobStatus: null,
     devices: new Map(),
+    logs: [],
     error: null,
   });
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -56,26 +79,29 @@ export function usePrepareJob() {
 
       setState((prev) => {
         const devices = new Map(prev.devices);
+        const log = (message: string, level: LogLevel = "info", serial?: string): LogEntry => ({
+          time: Date.now(), serial, message, level,
+        });
 
         switch (data.type) {
           case "snapshot": {
-            // Initial state from server
             const devEntries = Object.entries(data.devices) as [string, DeviceProgress][];
             for (const [serial, dp] of devEntries) {
               devices.set(serial, dp);
             }
-            return { ...prev, jobStatus: data.status, devices };
+            return { ...prev, jobStatus: data.status, devices,
+              logs: [...prev.logs, log(`Connected to job (status: ${data.status})`)] };
           }
 
           case "job:started":
-            return { ...prev, jobStatus: "running" };
+            return { ...prev, jobStatus: "running",
+              logs: [...prev.logs, log("Job started")] };
 
           case "device:started": {
             const dp = devices.get(data.serial);
-            if (dp) {
-              devices.set(data.serial, { ...dp, status: "preparing" });
-            }
-            return { ...prev, devices };
+            if (dp) devices.set(data.serial, { ...dp, status: "preparing" });
+            return { ...prev, devices,
+              logs: [...prev.logs, log("Starting preparation", "info", data.serial)] };
           }
 
           case "file:uploading": {
@@ -86,7 +112,8 @@ export function usePrepareJob() {
               );
               devices.set(data.serial, { ...dp, files });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Pushing ${data.fileName}`, "info", data.serial)] };
           }
 
           case "file:loaded": {
@@ -97,7 +124,8 @@ export function usePrepareJob() {
               );
               devices.set(data.serial, { ...dp, files });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Pushed ${data.fileName}`, "success", data.serial)] };
           }
 
           case "file:installing": {
@@ -108,7 +136,8 @@ export function usePrepareJob() {
               );
               devices.set(data.serial, { ...dp, files });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Installing ${data.fileName}`, "info", data.serial)] };
           }
 
           case "file:installed": {
@@ -119,7 +148,8 @@ export function usePrepareJob() {
               );
               devices.set(data.serial, { ...dp, files });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Installed ${data.fileName}`, "success", data.serial)] };
           }
 
           case "file:failed": {
@@ -132,15 +162,34 @@ export function usePrepareJob() {
               );
               devices.set(data.serial, { ...dp, files });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Failed: ${data.fileName} — ${data.error}`, "error", data.serial)] };
+          }
+
+          case "device:setup": {
+            const dp = devices.get(data.serial);
+            if (dp) {
+              devices.set(data.serial, {
+                ...dp, setupStep: data.step, setupMessage: data.message,
+              });
+            }
+            const stepMsg = data.message ? `${data.step}: ${data.message}` : data.step;
+            return { ...prev, devices,
+              logs: [...prev.logs, log(stepMsg, "info", data.serial)] };
+          }
+
+          case "device:log": {
+            return { ...prev,
+              logs: [...prev.logs, log(data.message, data.level || "info", data.serial)] };
           }
 
           case "device:prepared": {
             const dp = devices.get(data.serial);
             if (dp) {
-              devices.set(data.serial, { ...dp, status: "prepared" });
+              devices.set(data.serial, { ...dp, status: "prepared", setupStep: undefined, setupMessage: undefined });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log("Device prepared", "success", data.serial)] };
           }
 
           case "device:failed": {
@@ -148,14 +197,17 @@ export function usePrepareJob() {
             if (dp) {
               devices.set(data.serial, { ...dp, status: "failed", error: data.error });
             }
-            return { ...prev, devices };
+            return { ...prev, devices,
+              logs: [...prev.logs, log(`Failed: ${data.error}`, "error", data.serial)] };
           }
 
           case "job:completed":
-            return { ...prev, jobStatus: "completed" };
+            return { ...prev, jobStatus: "completed",
+              logs: [...prev.logs, log("All devices prepared", "success")] };
 
           case "job:failed":
-            return { ...prev, jobStatus: "failed", error: data.error };
+            return { ...prev, jobStatus: "failed", error: data.error,
+              logs: [...prev.logs, log(`Job failed: ${data.error}`, "error")] };
 
           default:
             return prev;
@@ -177,6 +229,7 @@ export function usePrepareJob() {
       jobId: null,
       jobStatus: null,
       devices: new Map(),
+      logs: [],
       error: null,
     });
 
@@ -200,7 +253,7 @@ export function usePrepareJob() {
         devices.set(serial, { serial, status: "pending", files: [] });
       }
 
-      setState({ jobId, jobStatus: "queued", devices, error: null });
+      setState({ jobId, jobStatus: "queued", devices, logs: [], error: null });
       subscribe(jobId);
     } catch (err) {
       setState((prev) => ({
@@ -218,6 +271,7 @@ export function usePrepareJob() {
       jobId: null,
       jobStatus: null,
       devices: new Map(),
+      logs: [],
       error: null,
     });
   }, [cleanup]);
