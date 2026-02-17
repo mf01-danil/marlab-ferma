@@ -1,0 +1,342 @@
+"use client";
+
+import { useEffect, useRef, useState, useCallback } from "react";
+
+interface Props {
+  serial: string;
+  wsUrl: string;
+}
+
+// Parse Annex B H264 stream into individual NAL units (strips start codes)
+function parseAnnexBNALUs(data: Uint8Array): Uint8Array[] {
+  const nalus: Uint8Array[] = [];
+  let i = 0;
+
+  while (i < data.length) {
+    // Find start code (0x000001 or 0x00000001)
+    let startCodeLen = 0;
+    if (i + 3 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      startCodeLen = 3;
+    } else if (
+      i + 4 < data.length &&
+      data[i] === 0 &&
+      data[i + 1] === 0 &&
+      data[i + 2] === 0 &&
+      data[i + 3] === 1
+    ) {
+      startCodeLen = 4;
+    }
+
+    if (startCodeLen === 0) {
+      i++;
+      continue;
+    }
+
+    const naluStart = i + startCodeLen;
+
+    // Find next start code
+    let naluEnd = data.length;
+    for (let j = naluStart + 1; j < data.length - 2; j++) {
+      if (data[j] === 0 && data[j + 1] === 0 && (data[j + 2] === 1 || (data[j + 2] === 0 && j + 3 < data.length && data[j + 3] === 1))) {
+        naluEnd = j;
+        break;
+      }
+    }
+
+    nalus.push(data.slice(naluStart, naluEnd));
+    i = naluEnd;
+  }
+
+  return nalus;
+}
+
+// Convert Annex B SPS/PPS to avcC configuration record
+function buildAvcC(configData: Uint8Array): Uint8Array {
+  const nalus = parseAnnexBNALUs(configData);
+
+  const spsList: Uint8Array[] = [];
+  const ppsList: Uint8Array[] = [];
+
+  for (const nalu of nalus) {
+    const naluType = nalu[0] & 0x1f;
+    if (naluType === 7) spsList.push(nalu); // SPS
+    if (naluType === 8) ppsList.push(nalu); // PPS
+  }
+
+  if (spsList.length === 0 || ppsList.length === 0) {
+    console.error("[avcC] No SPS/PPS found in config data");
+    return configData; // fallback
+  }
+
+  const sps = spsList[0];
+  const profileIdc = sps[1];
+  const profileCompat = sps[2];
+  const levelIdc = sps[3];
+
+  // Calculate total size
+  let totalSize = 6; // header
+  for (const s of spsList) totalSize += 2 + s.length;
+  totalSize += 1; // numPPS
+  for (const p of ppsList) totalSize += 2 + p.length;
+
+  const buf = new Uint8Array(totalSize);
+  const view = new DataView(buf.buffer);
+  let offset = 0;
+
+  buf[offset++] = 1; // configurationVersion
+  buf[offset++] = profileIdc;
+  buf[offset++] = profileCompat;
+  buf[offset++] = levelIdc;
+  buf[offset++] = 0xff; // lengthSizeMinusOne=3 (4-byte NAL length) | 0xFC reserved bits
+  buf[offset++] = 0xe0 | spsList.length; // numSPS | 0xE0 reserved bits
+
+  for (const s of spsList) {
+    view.setUint16(offset, s.length);
+    offset += 2;
+    buf.set(s, offset);
+    offset += s.length;
+  }
+
+  buf[offset++] = ppsList.length;
+  for (const p of ppsList) {
+    view.setUint16(offset, p.length);
+    offset += 2;
+    buf.set(p, offset);
+    offset += p.length;
+  }
+
+  return buf;
+}
+
+// Convert Annex B frame data to AVCC format (replace start codes with 4-byte lengths)
+function annexBToAvcc(data: Uint8Array): Uint8Array {
+  const nalus = parseAnnexBNALUs(data);
+  if (nalus.length === 0) return data;
+
+  let totalSize = 0;
+  for (const nalu of nalus) totalSize += 4 + nalu.length;
+
+  const result = new Uint8Array(totalSize);
+  const view = new DataView(result.buffer);
+  let offset = 0;
+
+  for (const nalu of nalus) {
+    view.setUint32(offset, nalu.length);
+    offset += 4;
+    result.set(nalu, offset);
+    offset += nalu.length;
+  }
+
+  return result;
+}
+
+export default function DeviceScreen({ serial, wsUrl }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const decoderRef = useRef<VideoDecoder | null>(null);
+  const [status, setStatus] = useState<string>("Connecting...");
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+
+  const initDecoder = useCallback(() => {
+    if (decoderRef.current?.state !== "closed") {
+      decoderRef.current?.close();
+    }
+
+    const decoder = new VideoDecoder({
+      output: (frame) => {
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          frame.close();
+          return;
+        }
+
+        canvas.width = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(frame, 0, 0);
+        }
+        frame.close();
+      },
+      error: (err) => {
+        console.error("[decoder] Error:", err);
+        setStatus(`Decoder error: ${err.message}`);
+      },
+    });
+
+    decoderRef.current = decoder;
+    return decoder;
+  }, []);
+
+  useEffect(() => {
+    const ws = new WebSocket(`${wsUrl}?serial=${encodeURIComponent(serial)}`);
+    ws.binaryType = "arraybuffer";
+    wsRef.current = ws;
+
+    let decoder: VideoDecoder | null = null;
+    let configured = false;
+
+    ws.onopen = () => {
+      setStatus("Connected, waiting for video...");
+    };
+
+    ws.onmessage = (event) => {
+      // JSON messages (metadata, errors)
+      if (typeof event.data === "string") {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "metadata") {
+            setDimensions({ width: msg.width, height: msg.height });
+            setStatus("Receiving video...");
+          } else if (msg.type === "error") {
+            setStatus(`Error: ${msg.message}`);
+          }
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      // Binary messages (video frames)
+      const data = new Uint8Array(event.data);
+      if (data.length < 13) return;
+
+      // Parse header: type (1) + pts (8) + size (4)
+      const frameType = data[0]; // 0=data, 1=config, 2=keyframe
+      const view = new DataView(event.data);
+      const pts = view.getFloat64(1);
+      const size = view.getUint32(9);
+
+      const frameData = data.slice(13, 13 + size);
+
+      if (frameType === 1) {
+        // Configuration packet (SPS/PPS) — convert from Annex B to avcC
+        if (!decoder || decoder.state === "closed") {
+          decoder = initDecoder();
+        }
+
+        const avcC = buildAvcC(frameData);
+        const sps = parseAnnexBNALUs(frameData).find((n) => (n[0] & 0x1f) === 7);
+        const codecStr = sps
+          ? `avc1.${[sps[1], sps[2], sps[3]].map((b) => b.toString(16).padStart(2, "0")).join("")}`
+          : "avc1.640028";
+
+        console.log(`[decoder] Configuring codec=${codecStr}, avcC size=${avcC.length}`);
+
+        decoder.configure({
+          codec: codecStr,
+          description: avcC,
+          optimizeForLatency: true,
+        });
+        configured = true;
+        setStatus("Streaming");
+        return;
+      }
+
+      if (!configured || !decoder || decoder.state !== "configured") return;
+
+      try {
+        // Convert frame from Annex B to AVCC format
+        const avccData = annexBToAvcc(frameData);
+        const chunk = new EncodedVideoChunk({
+          type: frameType === 2 ? "key" : "delta",
+          timestamp: pts,
+          data: avccData,
+        });
+        decoder.decode(chunk);
+      } catch (err) {
+        console.warn("[decoder] Decode error:", err);
+      }
+    };
+
+    ws.onclose = () => {
+      setStatus("Disconnected");
+    };
+
+    ws.onerror = () => {
+      setStatus("Connection failed");
+    };
+
+    return () => {
+      ws.close();
+      if (decoder && decoder.state !== "closed") {
+        decoder.close();
+      }
+    };
+  }, [serial, wsUrl, initDecoder]);
+
+  // Input handlers
+  const getDeviceCoords = (
+    e: React.MouseEvent<HTMLCanvasElement>
+  ): { x: number; y: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || !dimensions.width || !dimensions.height) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = dimensions.width / rect.width;
+    const scaleY = dimensions.height / rect.height;
+
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    };
+  };
+
+  const sendTouch = (action: "down" | "up" | "move", e: React.MouseEvent<HTMLCanvasElement>) => {
+    const coords = getDeviceCoords(e);
+    if (!coords || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    wsRef.current.send(
+      JSON.stringify({
+        type: "touch",
+        action,
+        x: coords.x,
+        y: coords.y,
+      })
+    );
+  };
+
+  const [isMouseDown, setIsMouseDown] = useState(false);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 8, fontSize: 13, color: "#666" }}>
+        {status}
+        {dimensions.width > 0 && ` — ${dimensions.width}x${dimensions.height}`}
+      </div>
+      <canvas
+        ref={canvasRef}
+        style={{
+          maxWidth: "100%",
+          height: "auto",
+          border: "1px solid #ddd",
+          borderRadius: 4,
+          cursor: "crosshair",
+          touchAction: "none",
+        }}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          setIsMouseDown(true);
+          sendTouch("down", e);
+        }}
+        onMouseMove={(e) => {
+          if (isMouseDown) {
+            sendTouch("move", e);
+          }
+        }}
+        onMouseUp={(e) => {
+          setIsMouseDown(false);
+          sendTouch("up", e);
+        }}
+        onMouseLeave={(e) => {
+          if (isMouseDown) {
+            setIsMouseDown(false);
+            sendTouch("up", e);
+          }
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+      />
+    </div>
+  );
+}
