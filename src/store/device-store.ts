@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { Device, ViewMode, DeviceFilter } from "@/types/device";
-import { generateMockDevices } from "@/lib/mock-data";
 
 interface DeviceStore {
   devices: Device[];
@@ -16,7 +15,7 @@ interface DeviceStore {
 }
 
 export const useDeviceStore = create<DeviceStore>((set) => ({
-  devices: generateMockDevices(185),
+  devices: [],
   selectedIds: new Set<string>(),
   viewMode: "grid",
   filter: { status: "all", group: "all", search: "" },

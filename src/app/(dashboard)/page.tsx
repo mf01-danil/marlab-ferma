@@ -3,8 +3,10 @@
 import { Smartphone, Wifi, WifiOff, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useDeviceStore } from "@/store/device-store";
+import { useDevices } from "@/hooks/use-devices";
 
 export default function DashboardPage() {
+  useDevices();
   const devices = useDeviceStore((s) => s.devices);
 
   const online = devices.filter((d) => d.status === "device").length;
@@ -24,7 +26,7 @@ export default function DashboardPage() {
       title: "Online",
       value: online,
       icon: Wifi,
-      description: `${((online / devices.length) * 100).toFixed(0)}% availability`,
+      description: devices.length > 0 ? `${((online / devices.length) * 100).toFixed(0)}% availability` : "No devices",
     },
     {
       title: "Offline",

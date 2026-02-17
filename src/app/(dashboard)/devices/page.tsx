@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { Smartphone } from "lucide-react";
+import { Smartphone, Loader2 } from "lucide-react";
 import { useDeviceStore } from "@/store/device-store";
+import { useDevices } from "@/hooks/use-devices";
 import { DeviceToolbar } from "@/components/devices/device-toolbar";
 import { DeviceGrid } from "@/components/devices/device-grid";
 import { DeviceTable } from "@/components/devices/device-table";
@@ -11,6 +12,7 @@ import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/common/page-header";
 
 export default function DevicesPage() {
+  const { isLoading, error } = useDevices();
   const { devices, viewMode, filter } = useDeviceStore();
 
   const filtered = useMemo(() => {
@@ -44,7 +46,17 @@ export default function DevicesPage() {
 
       <DeviceToolbar />
 
-      {filtered.length === 0 ? (
+      {error ? (
+        <EmptyState
+          icon={Smartphone}
+          title="Cannot connect to backend"
+          description="Make sure the backend is running on port 3001."
+        />
+      ) : isLoading ? (
+        <div className="flex items-center justify-center h-64">
+          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : filtered.length === 0 ? (
         <EmptyState
           icon={Smartphone}
           title="No devices found"
