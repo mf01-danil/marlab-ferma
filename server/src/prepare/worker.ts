@@ -15,6 +15,25 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
   const log = (msg: string, level: "info" | "success" | "warn" | "error" = "info") =>
     jobStore.deviceLog(jobId, serial, msg, level);
 
+  // Attach logger so all transport methods can report progress
+  transport.setLog(log);
+
+  // Start background dialog watcher for the entire preparation process
+  const stopWatcher = transport.startDialogWatcher((msg) => log(msg));
+  try {
+    await _prepareDeviceInner(jobId, serial, manifest, transport, log);
+  } finally {
+    stopWatcher();
+  }
+}
+
+async function _prepareDeviceInner(
+  jobId: string,
+  serial: string,
+  manifest: ReturnType<typeof loadManifest>,
+  transport: DeviceTransport,
+  log: (msg: string, level?: "info" | "success" | "warn" | "error") => void
+): Promise<void> {
   // --- Connectivity check ---
   log("Checking device connectivity...");
   const online = await transport.checkOnline();
@@ -87,6 +106,7 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
         jobStore.deviceFailed(jobId, serial, `Failed to install ${file.name}: ${(err as Error).message}`);
         return;
       }
+
     }
     log(`All ${apks.length} APKs installed`, "success");
   }
@@ -95,7 +115,7 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
   const magiskSetup = manifest.magiskSetup;
   if (magiskSetup?.enabled) {
     log("Starting Magisk setup...");
-    const setupOk = await runMagiskSetup(jobId, serial, manifest);
+    const setupOk = await runMagiskSetup(jobId, serial, manifest, transport);
     if (!setupOk) return;
     log("Magisk setup complete!", "success");
   }
@@ -103,241 +123,354 @@ async function prepareDevice(jobId: string, serial: string): Promise<void> {
   jobStore.devicePrepared(jobId, serial);
 }
 
-const KITSUNE_PACKAGE = "com.topjohnwu.magisk";
+const KITSUNE_PACKAGE_FALLBACK = "com.topjohnwu.magisk";
 
 async function runMagiskSetup(
   jobId: string,
   serial: string,
-  manifest: ReturnType<typeof loadManifest>
+  manifest: ReturnType<typeof loadManifest>,
+  transport: DeviceTransport
 ): Promise<boolean> {
-  const transport = createTransport(serial);
   const log = (msg: string, level: "info" | "success" | "warn" | "error" = "info") =>
     jobStore.deviceLog(jobId, serial, msg, level);
 
-  // ── [1/7] Check Magisk binary ──
-  log("[1/7] Checking Magisk binary...");
-  jobStore.deviceSetup(jobId, serial, "checking-magisk");
-  const magisk = await transport.getMagiskVersionNoRoot();
-  if (!magisk) {
-    jobStore.deviceFailed(jobId, serial, "Kitsune Mask not found — magisk binary is missing on device");
-    return false;
-  }
-  log(`[1/7] Magisk found: ${magisk.versionName} (${magisk.versionCode})`, "success");
-  jobStore.deviceSetup(jobId, serial, "checking-magisk", magisk.versionName);
+  // Detect Kitsune Mask package
+  log("Detecting Kitsune Mask package...");
+  const detectedPackage = await transport.detectKitsunePackage();
+  const KITSUNE_PACKAGE = detectedPackage || KITSUNE_PACKAGE_FALLBACK;
+  log(`Package: ${KITSUNE_PACKAGE}`, detectedPackage ? "success" : "warn");
 
-  // ── [2/7] WiFi ──
+  // Log current version info (informational, non-blocking)
+  const magisk = await transport.getMagiskVersionNoRoot();
+  if (magisk) {
+    log(`Current binary: ${magisk.versionName} (${magisk.versionCode})`);
+  } else {
+    log("Magisk binary not found on device — will be installed by Kitsune", "warn");
+  }
+
+  // ── [1/8] WiFi ──
   if (manifest.magiskSetup?.connectWifi !== false && manifest.wifi) {
     const currentSsid = await transport.getConnectedWifiSsid();
     if (currentSsid === manifest.wifi.ssid) {
-      log(`[2/7] WiFi — already connected to "${manifest.wifi.ssid}", skipped`, "success");
+      log(`[1/8] WiFi — already connected to "${manifest.wifi.ssid}", skipped`, "success");
     } else {
-      log(`[2/7] Connecting to WiFi "${manifest.wifi.ssid}"...`);
-      jobStore.deviceSetup(jobId, serial, "connecting-wifi", manifest.wifi.ssid);
-      try {
-        await transport.connectWifi(
-          manifest.wifi.ssid,
-          manifest.wifi.password,
-          manifest.wifi.security
-        );
-        log("WiFi connect command sent", "success");
-      } catch (err) {
-        log(`WiFi connect failed: ${(err as Error).message}`, "error");
-        jobStore.deviceFailed(jobId, serial, `WiFi connection failed: ${(err as Error).message}`);
-        return false;
-      }
+      const alreadyOnline = currentSsid
+        ? false
+        : await transport.waitForInternet(5000);
 
-      log("Waiting for internet (max 30s)...");
-      jobStore.deviceSetup(jobId, serial, "waiting-internet", "Checking connectivity...");
-      const hasInternet = await transport.waitForInternet(30000);
-      if (!hasInternet) {
-        log("No internet after 30s — continuing anyway", "warn");
+      if (alreadyOnline) {
+        log(`[1/8] WiFi — internet available, skipped`, "success");
       } else {
-        log("Internet connected", "success");
+        log(`[1/8] Connecting to WiFi "${manifest.wifi.ssid}"...`);
+        jobStore.deviceSetup(jobId, serial, "connecting-wifi", manifest.wifi.ssid);
+        try {
+          await transport.connectWifi(
+            manifest.wifi.ssid,
+            manifest.wifi.password,
+            manifest.wifi.security
+          );
+          log("WiFi connect command sent", "success");
+        } catch (err) {
+          log(`WiFi connect failed: ${(err as Error).message}`, "error");
+          jobStore.deviceFailed(jobId, serial, `WiFi connection failed: ${(err as Error).message}`);
+          return false;
+        }
+
+        log("Waiting for internet (max 30s)...");
+        jobStore.deviceSetup(jobId, serial, "waiting-internet", "Checking connectivity...");
+        const hasInternet = await transport.waitForInternet(30000);
+        if (!hasInternet) {
+          log("No internet after 30s — continuing anyway", "warn");
+        } else {
+          log("Internet connected", "success");
+        }
       }
     }
   } else {
-    log("[2/7] WiFi — skipped (disabled or no config)");
+    log("[1/8] WiFi — skipped (disabled or no config)");
   }
 
-  // ── [3/7] Root access ──
-  log("[3/7] Checking root access...");
-  jobStore.deviceSetup(jobId, serial, "checking-root");
-  let hasRoot = await transport.checkRoot();
-
-  if (!hasRoot) {
-    // Maybe Magisk was installed on a previous run but superuser wasn't configured
-    // Try configuring superuser first before doing a full install
-    log("[3/7] Root not available — trying to configure superuser (previous install?)...", "warn");
-    await unlockScreen(serial);
-
-    try {
-      await transport.enableShellSuperuser(KITSUNE_PACKAGE);
-      await new Promise((r) => setTimeout(r, 2000));
-      hasRoot = await transport.checkRoot();
-    } catch {
-      // App not accessible or not installed — need full install
-    }
-
-    if (hasRoot) {
-      log("[3/7] Root configured from previous install!", "success");
-    }
+  // ── [2/8] Grant install permission for Kitsune Mask ──
+  log("[2/8] Granting install from unknown sources...");
+  try {
+    await transport.grantInstallPermission(KITSUNE_PACKAGE);
+    log("[2/8] Install permission granted", "success");
+  } catch (err) {
+    log(`[2/8] Install permission failed: ${(err as Error).message}`, "warn");
   }
 
-  if (!hasRoot) {
-    log("[3/7] Full Magisk install needed — starting Direct Install...", "warn");
-    jobStore.deviceSetup(jobId, serial, "awaiting-magisk-update", "Installing Magisk...");
+  // ── [3/8] Update Kitsune Manager App ──
+  log("[3/8] Updating Kitsune Mask app...");
+  jobStore.deviceSetup(jobId, serial, "updating-kitsune-app", "Updating Kitsune app...");
+  await unlockScreen(serial);
 
-    await unlockScreen(serial);
+  const appUpdated = await transport.updateKitsuneApp(KITSUNE_PACKAGE);
+  if (!appUpdated) {
+    log("[3/8] Kitsune app update failed", "error");
+    jobStore.deviceFailed(jobId, serial, "Failed to update Kitsune Mask app via UI");
+    return false;
+  }
+  log("[3/8] Kitsune app update complete", "success");
 
-    // Step 3a: Install Magisk via UI (Direct Install)
-    log("Running Direct Install in Kitsune Mask...");
-    const installed = await transport.installMagiskViaUI(KITSUNE_PACKAGE);
-    if (!installed) {
-      log("Magisk UI install failed — could not find required UI elements", "error");
-      jobStore.deviceFailed(jobId, serial, "Magisk UI automation failed — try installing manually");
-      return false;
-    }
+  // ── [4/8] Magisk Direct Install → reboot ──
+  log("[4/8] Starting Magisk Direct Install...");
+  jobStore.deviceSetup(jobId, serial, "awaiting-magisk-update", "Magisk Direct Install...");
+  await unlockScreen(serial);
 
-    log("Magisk install triggered — waiting for reboot...", "success");
+  const directInstallOk = await transport.installMagiskViaUI(KITSUNE_PACKAGE);
+  if (!directInstallOk) {
+    log("[4/8] Magisk Direct Install failed", "error");
+    jobStore.deviceFailed(jobId, serial, "Magisk Direct Install UI automation failed — try manually");
+    return false;
+  }
 
-    // Wait for device to actually go offline (reboot may be delayed)
-    jobStore.deviceSetup(jobId, serial, "waiting-boot", "Waiting for reboot to start...");
-    const wentOffline = await waitForDeviceOffline(transport, 180000);
-    if (!wentOffline) {
-      log("Device didn't reboot — maybe Magisk was already installed", "warn");
-    }
+  log("[4/8] Direct Install triggered — waiting for reboot...", "success");
 
-    // Wait for boot
-    log("Waiting for device to come back (max 3 min)...");
-    jobStore.deviceSetup(jobId, serial, "waiting-boot", "Rebooting after Magisk install...");
-    let booted = await transport.waitForBoot(180000);
+  // Wait for offline → boot
+  jobStore.deviceSetup(jobId, serial, "waiting-boot", "Rebooting after Direct Install...");
+  const wentOffline = await waitForDeviceOffline(transport, 180000);
+  if (!wentOffline) {
+    log("Device didn't go offline — checking if already rebooted...", "warn");
+  }
+
+  let booted = await transport.waitForBoot(180000);
+  if (!booted) {
+    jobStore.deviceFailed(jobId, serial, "Device did not come back after Direct Install reboot (3 min timeout)");
+    return false;
+  }
+
+  // Stability check — handle double reboot
+  await new Promise((r) => setTimeout(r, 10000));
+  let stillOnline = await transport.checkOnline();
+  if (!stillOnline) {
+    log("Device went offline again — waiting for second reboot...");
+    booted = await transport.waitForBoot(180000);
     if (!booted) {
-      jobStore.deviceFailed(jobId, serial, "Device did not come back after reboot (3 min timeout)");
+      jobStore.deviceFailed(jobId, serial, "Device did not come back after second reboot");
       return false;
     }
-
-    // Stability check — handle double reboot (common with Magisk)
     await new Promise((r) => setTimeout(r, 10000));
-    let stillOnline = await transport.checkOnline();
-    if (!stillOnline) {
-      log("Device went offline again — waiting for second reboot...");
-      booted = await transport.waitForBoot(180000);
-      if (!booted) {
-        jobStore.deviceFailed(jobId, serial, "Device did not come back after second reboot");
-        return false;
-      }
-      await new Promise((r) => setTimeout(r, 10000));
-      stillOnline = await transport.checkOnline();
-      if (!stillOnline) {
-        jobStore.deviceFailed(jobId, serial, "Device keeps going offline after Magisk install");
-        return false;
-      }
-    }
+  }
 
-    log("Device back online", "success");
-    await new Promise((r) => setTimeout(r, 5000));
+  log("[4/8] Device back online after Direct Install", "success");
+  await new Promise((r) => setTimeout(r, 5000));
+  await unlockScreen(serial);
+
+  // ── [5/8] Configure Superuser ──
+  log("[5/8] Configuring superuser access...");
+  jobStore.deviceSetup(jobId, serial, "checking-root");
+
+  // Try sqlite first
+  let suConfigOk = await transport.configureSuperuser();
+  if (suConfigOk) {
+    log("[5/8] Superuser configured via sqlite (Apps+ADB, auto-Allow)", "success");
+  } else {
+    log("sqlite failed — trying UI...", "warn");
     await unlockScreen(serial);
-
-    // Step 3b: Enable Shell superuser + set auto-response to Allow
-    log("Configuring superuser access in Kitsune Mask...");
-    jobStore.deviceSetup(jobId, serial, "awaiting-magisk-update", "Enabling root for Shell...");
     try {
       await transport.enableShellSuperuser(KITSUNE_PACKAGE);
-      log("Superuser configured", "success");
+      suConfigOk = true;
+      log("[5/8] Superuser configured via UI", "success");
     } catch (err) {
-      log(`Superuser config error: ${(err as Error).message}`, "warn");
+      log(`[5/8] Superuser UI config failed: ${(err as Error).message}`, "warn");
     }
-
-    // Verify root
-    await new Promise((r) => setTimeout(r, 2000));
-    hasRoot = await transport.checkRoot();
-    if (hasRoot) {
-      log("[3/7] Root access confirmed!", "success");
-    } else {
-      jobStore.deviceFailed(jobId, serial, "Root still not available after Magisk install — try manually");
-      return false;
-    }
-  } else {
-    log("[3/7] Root access available", "success");
   }
 
-  // ── [4/7] Magisk version (root) ──
-  log("[4/7] Getting Magisk version (root)...");
-  const magiskRoot = await transport.getMagiskVersion();
-  if (magiskRoot) {
-    log(`[4/7] Magisk: ${magiskRoot.versionName} (${magiskRoot.versionCode})`, "success");
+  // Verify root
+  await new Promise((r) => setTimeout(r, 2000));
+  const hasRoot = await transport.checkRoot();
+  if (hasRoot) {
+    log("[5/8] Root access confirmed!", "success");
   } else {
-    log("[4/7] Could not get Magisk version with root", "warn");
+    log("[5/8] Root not available after setup!", "error");
+    jobStore.deviceFailed(jobId, serial, "Root not available after Kitsune Direct Install");
+    return false;
   }
 
-  // ── [5/7] Zygisk ──
+  // ── [6/8] Zygisk — enable + reboot ──
   if (manifest.magiskSetup?.enableZygisk !== false) {
+    log("[6/8] Checking Zygisk status...");
     const zygiskOn = await transport.isZygiskEnabled();
     if (zygiskOn) {
-      log("[5/7] Zygisk — already enabled, skipped", "success");
+      log("[6/8] Zygisk — already enabled", "success");
     } else {
-      log("[5/7] Enabling Zygisk...");
+      log("[6/8] Zygisk is OFF — enabling...");
       jobStore.deviceSetup(jobId, serial, "enabling-zygisk");
 
-      // Try sqlite first, fall back to UI toggle
       let zygiskOk = false;
       try {
         await transport.enableZygisk();
         zygiskOk = true;
+        log("[6/8] Zygisk enabled via sqlite", "success");
       } catch {
-        log("Zygisk sqlite failed — trying UI toggle...", "warn");
+        log("[6/8] Zygisk sqlite failed — trying UI toggle...", "warn");
       }
 
       if (!zygiskOk) {
         await unlockScreen(serial);
         zygiskOk = await transport.enableZygiskViaUI(KITSUNE_PACKAGE);
+        if (zygiskOk) {
+          log("[6/8] Zygisk enabled via UI", "success");
+        }
       }
 
-      if (zygiskOk) {
-        log("[5/7] Zygisk enabled", "success");
-      } else {
+      if (!zygiskOk) {
+        log("[6/8] Failed to enable Zygisk!", "error");
         jobStore.deviceFailed(jobId, serial, "Failed to enable Zygisk");
         return false;
       }
-    }
-  } else {
-    log("[5/7] Zygisk — skipped (disabled in config)");
-  }
 
-  // ── [6/7] Magisk modules ──
-  const modules = manifest.files.filter((f) => f.action === "magisk-module");
-  if (modules.length > 0) {
-    log(`[6/7] Installing ${modules.length} Magisk modules...`);
-    jobStore.deviceSetup(jobId, serial, "installing-modules", `0/${modules.length}`);
-
-    for (let i = 0; i < modules.length; i++) {
-      const mod = modules[i];
-      const remotePath = join(manifest.targetDir, mod.name).replace(/\\/g, "/");
-
-      log(`Module ${i + 1}/${modules.length}: ${mod.name}`);
-      jobStore.fileInstalling(jobId, serial, mod.name);
+      log("[6/8] Sending reboot command...");
+      jobStore.deviceSetup(jobId, serial, "rebooting", "Reboot after Zygisk");
 
       try {
-        await transport.installMagiskModule(remotePath);
-        jobStore.fileInstalled(jobId, serial, mod.name);
-        log(`${mod.name} — installed`, "success");
+        await transport.reboot();
+        log("[6/8] Reboot command sent", "success");
       } catch (err) {
-        jobStore.fileFailed(jobId, serial, mod.name, `Install failed: ${(err as Error).message}`);
-        jobStore.deviceFailed(jobId, serial, `Failed to install module ${mod.name}: ${(err as Error).message}`);
+        jobStore.deviceFailed(jobId, serial, `Reboot failed: ${(err as Error).message}`);
         return false;
       }
 
-      jobStore.deviceSetup(jobId, serial, "installing-modules", `${i + 1}/${modules.length}`);
+      log("[6/8] Waiting for device to go offline...");
+      const zygOffline = await waitForDeviceOffline(transport, 60000);
+      if (zygOffline) {
+        log("[6/8] Device is offline — rebooting", "success");
+      } else {
+        log("[6/8] Device didn't go offline after 60s", "warn");
+      }
+
+      log("[6/8] Waiting for device to boot (max 3 min)...");
+      jobStore.deviceSetup(jobId, serial, "waiting-boot", "Rebooting after Zygisk...");
+      const zygBooted = await transport.waitForBoot(180000);
+      if (!zygBooted) {
+        jobStore.deviceFailed(jobId, serial, "Device did not come back after Zygisk reboot");
+        return false;
+      }
+      log("[6/8] Device is back online — waiting 10s for stability...");
+
+      await new Promise((r) => setTimeout(r, 10000));
+      const rootAfterZygisk = await transport.checkRoot();
+      if (rootAfterZygisk) {
+        log("[6/8] Zygisk reboot complete, root OK", "success");
+      } else {
+        log("[6/8] Root lost after Zygisk reboot!", "error");
+        jobStore.deviceFailed(jobId, serial, "Root lost after Zygisk reboot");
+        return false;
+      }
     }
-    log(`[6/7] All ${modules.length} modules installed`, "success");
   } else {
-    log("[6/7] No Magisk modules to install");
+    log("[6/8] Zygisk — skipped (disabled in config)");
   }
 
-  // ── [7/7] Reboot ──
+  // ── [7/8] Install Magisk modules via Kitsune UI ──
+  const modules = manifest.files.filter((f) => f.action === "magisk-module");
+  if (modules.length > 0) {
+    // Separate LSPosed (needs reboot) from other modules
+    const lsposedMod = modules.find((m) => m.name.toLowerCase().includes("lsposed"));
+    const otherModules = modules.filter((m) => m !== lsposedMod);
+
+    const totalModules = modules.length;
+    let installedCount = 0;
+
+    log(`[7/8] Installing ${totalModules} Magisk modules via Kitsune UI...`);
+    jobStore.deviceSetup(jobId, serial, "installing-modules", `0/${totalModules}`);
+
+    // --- Install LSPosed first (requires reboot) ---
+    if (lsposedMod) {
+      const remotePath = join(manifest.targetDir, lsposedMod.name).replace(/\\/g, "/");
+      log(`Module: ${lsposedMod.name} (install -> reboot -> verify)`);
+      jobStore.fileInstalling(jobId, serial, lsposedMod.name);
+
+      await unlockScreen(serial);
+      const lsposedOk = await transport.installModuleViaUI(KITSUNE_PACKAGE, remotePath, log);
+      if (!lsposedOk) {
+        jobStore.fileFailed(jobId, serial, lsposedMod.name, "UI install failed");
+        jobStore.deviceFailed(jobId, serial, `Failed to install ${lsposedMod.name} via UI`);
+        return false;
+      }
+      jobStore.fileInstalled(jobId, serial, lsposedMod.name);
+      installedCount++;
+      log(`${lsposedMod.name} — installed`, "success");
+      jobStore.deviceSetup(jobId, serial, "installing-modules", `${installedCount}/${totalModules}`);
+
+      // Reboot after LSPosed
+      log("Rebooting after LSPosed install...");
+      jobStore.deviceSetup(jobId, serial, "rebooting", "Reboot after LSPosed");
+      try {
+        await transport.reboot();
+      } catch (err) {
+        jobStore.deviceFailed(jobId, serial, `Reboot failed: ${(err as Error).message}`);
+        return false;
+      }
+
+      const lsOffline = await waitForDeviceOffline(transport, 60000);
+      if (!lsOffline) {
+        log("Device didn't go offline", "warn");
+      }
+
+      log("Waiting for device to come back (max 3 min)...");
+      jobStore.deviceSetup(jobId, serial, "waiting-boot", "Rebooting after LSPosed...");
+      const lsBooted = await transport.waitForBoot(180000);
+      if (!lsBooted) {
+        jobStore.deviceFailed(jobId, serial, "Device did not come back after LSPosed reboot");
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 10000));
+      log("Device back online after LSPosed reboot", "success");
+
+      const rootOk = await transport.checkRoot();
+      if (!rootOk) {
+        log("Root lost after LSPosed reboot!", "error");
+        jobStore.deviceFailed(jobId, serial, "Root lost after LSPosed reboot");
+        return false;
+      }
+
+      // Verify LSPosed activation
+      await unlockScreen(serial);
+      log("Verifying LSPosed activation...");
+      try {
+        const lsposedCheck = await shell(serial,
+          "pm list packages 2>/dev/null | grep -i lsposed || dumpsys notification | grep -i lsposed || echo NOT_FOUND",
+          10000
+        );
+        if (lsposedCheck.trim() !== "NOT_FOUND" && lsposedCheck.trim().length > 0) {
+          log("LSPosed is active!", "success");
+        } else {
+          log("LSPosed not detected yet — may still be OK", "warn");
+        }
+      } catch {
+        log("LSPosed verification failed — continuing", "warn");
+      }
+    }
+
+    // --- Install remaining modules (KnoxPatch, etc.) ---
+    for (const mod of otherModules) {
+      const remotePath = join(manifest.targetDir, mod.name).replace(/\\/g, "/");
+      log(`Module: ${mod.name}`);
+      jobStore.fileInstalling(jobId, serial, mod.name);
+
+      await unlockScreen(serial);
+      const modOk = await transport.installModuleViaUI(KITSUNE_PACKAGE, remotePath, log);
+      if (!modOk) {
+        jobStore.fileFailed(jobId, serial, mod.name, "UI install failed");
+        jobStore.deviceFailed(jobId, serial, `Failed to install ${mod.name} via UI`);
+        return false;
+      }
+      jobStore.fileInstalled(jobId, serial, mod.name);
+      installedCount++;
+      log(`${mod.name} — installed`, "success");
+      jobStore.deviceSetup(jobId, serial, "installing-modules", `${installedCount}/${totalModules}`);
+    }
+
+    log(`[7/8] All ${totalModules} modules installed`, "success");
+  } else {
+    log("[7/8] No Magisk modules to install");
+  }
+
+  // ── [8/8] Final reboot + verify root ──
   if (manifest.magiskSetup?.rebootAfter !== false) {
-    log("[7/7] Rebooting device...");
-    jobStore.deviceSetup(jobId, serial, "rebooting");
+    log("[8/8] Final reboot...");
+    jobStore.deviceSetup(jobId, serial, "rebooting", "Final reboot");
     try {
       await transport.reboot();
       log("Reboot command sent", "success");
@@ -346,16 +479,31 @@ async function runMagiskSetup(
       return false;
     }
 
+    const finalOffline = await waitForDeviceOffline(transport, 60000);
+    if (!finalOffline) {
+      log("Device didn't go offline", "warn");
+    }
+
     log("Waiting for device to come back (max 3 min)...");
     jobStore.deviceSetup(jobId, serial, "waiting-boot");
-    const booted = await transport.waitForBoot(180000);
-    if (!booted) {
-      jobStore.deviceFailed(jobId, serial, "Device did not come back after reboot (3 min timeout)");
+    const finalBooted = await transport.waitForBoot(180000);
+    if (!finalBooted) {
+      jobStore.deviceFailed(jobId, serial, "Device did not come back after final reboot");
       return false;
     }
-    log("[7/7] Device back online", "success");
+    log("Device back online", "success");
+
+    await new Promise((r) => setTimeout(r, 10000));
+    const rootAfterReboot = await transport.checkRoot();
+    if (rootAfterReboot) {
+      log("[8/8] Root verified after final reboot", "success");
+    } else {
+      log("[8/8] Root NOT available after final reboot!", "error");
+      jobStore.deviceFailed(jobId, serial, "Root lost after final reboot");
+      return false;
+    }
   } else {
-    log("[7/7] Reboot — skipped (disabled in config)");
+    log("[8/8] Final reboot — skipped (disabled in config)");
   }
 
   return true;

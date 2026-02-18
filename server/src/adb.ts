@@ -5,7 +5,8 @@ function adb(args: string[], timeoutMs = 10000): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile("adb", args, { timeout: timeoutMs }, (err, stdout, stderr) => {
       if (err) {
-        reject(new Error(`adb ${args.join(" ")} failed: ${stderr || err.message}`));
+        const detail = stderr?.trim() || stdout?.trim() || err.message;
+        reject(new Error(`adb ${args.join(" ")} failed: ${detail}`));
         return;
       }
       resolve(stdout);
@@ -58,8 +59,38 @@ export async function install(
   return adb(["-s", serial, "install", "-r", "-g", localPath], 120000);
 }
 
-export async function shell(serial: string, command: string): Promise<string> {
-  return adb(["-s", serial, "shell", command]);
+export async function shell(serial: string, command: string, timeoutMs = 10000): Promise<string> {
+  return adb(["-s", serial, "shell", command], timeoutMs);
+}
+
+export async function shellSu(serial: string, command: string, timeoutMs = 30000): Promise<string> {
+  return adb(["-s", serial, "shell", `su -c '${command}'`], timeoutMs);
+}
+
+export async function rebootDevice(serial: string): Promise<void> {
+  await adb(["-s", serial, "reboot"], 10000);
+}
+
+export async function waitForDevice(serial: string, timeoutMs = 120000): Promise<void> {
+  await adb(["-s", serial, "wait-for-device"], timeoutMs);
+}
+
+export async function waitForBoot(serial: string, timeoutMs = 180000): Promise<boolean> {
+  const start = Date.now();
+  // First wait for USB reconnection
+  await waitForDevice(serial, timeoutMs);
+
+  // Then poll sys.boot_completed
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const result = await shell(serial, "getprop sys.boot_completed", 5000);
+      if (result.trim() === "1") return true;
+    } catch {
+      // device not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return false;
 }
 
 export async function forward(

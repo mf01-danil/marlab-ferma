@@ -3,7 +3,13 @@ import { Device } from "@/types/device";
 export function getApiUrl(): string {
   if (typeof window !== "undefined") {
     const saved = localStorage.getItem("marlab_api_url");
-    if (saved) return saved;
+    if (saved) {
+      if (saved.includes("trycloudflare") || saved.includes("ngrok")) {
+        localStorage.removeItem("marlab_api_url");
+      } else {
+        return saved;
+      }
+    }
     return `${window.location.protocol}//${window.location.hostname}:3001`;
   }
   return "http://localhost:3001";

@@ -42,6 +42,8 @@ export type PrepareEvent =
   | { type: "file:installing"; jobId: string; serial: string; fileName: string }
   | { type: "file:installed"; jobId: string; serial: string; fileName: string }
   | { type: "file:failed"; jobId: string; serial: string; fileName: string; error: string }
+  | { type: "device:setup"; jobId: string; serial: string; step: SetupStep; message?: string }
+  | { type: "device:log"; jobId: string; serial: string; message: string; level: "info" | "success" | "warn" | "error" }
   | { type: "device:prepared"; jobId: string; serial: string }
   | { type: "device:failed"; jobId: string; serial: string; error: string }
   | { type: "job:completed"; jobId: string }
@@ -54,8 +56,21 @@ export const PrepareRequestSchema = z.object({
 
 export type PrepareRequest = z.infer<typeof PrepareRequestSchema>;
 
+// --- Setup step events ---
+export type SetupStep =
+  | "checking-magisk"
+  | "connecting-wifi"
+  | "waiting-internet"
+  | "checking-root"
+  | "updating-kitsune-app"
+  | "awaiting-magisk-update"
+  | "enabling-zygisk"
+  | "installing-modules"
+  | "rebooting"
+  | "waiting-boot";
+
 // --- Bundle manifest ---
-export type BundleFileAction = "push" | "install";
+export type BundleFileAction = "push" | "install" | "magisk-module";
 
 export interface BundleFile {
   name: string;
@@ -64,8 +79,23 @@ export interface BundleFile {
   description?: string;
 }
 
+export interface WifiConfig {
+  ssid: string;
+  password: string;
+  security?: string;
+}
+
+export interface MagiskSetupConfig {
+  enabled: boolean;
+  enableZygisk?: boolean;
+  connectWifi?: boolean;
+  rebootAfter?: boolean;
+}
+
 export interface BundleManifest {
   version: string;
   targetDir: string;
+  wifi?: WifiConfig;
+  magiskSetup?: MagiskSetupConfig;
   files: BundleFile[];
 }

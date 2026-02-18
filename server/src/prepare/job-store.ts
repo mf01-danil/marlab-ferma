@@ -1,4 +1,4 @@
-import type { PrepareJob, DeviceProgress, FileProgress, PrepareEvent } from "./types";
+import type { PrepareJob, DeviceProgress, FileProgress, PrepareEvent, SetupStep } from "./types";
 import { EventEmitter } from "events";
 
 class JobStore extends EventEmitter {
@@ -98,6 +98,14 @@ class JobStore extends EventEmitter {
     fp.status = "failed";
     fp.error = error;
     this.emitEvent({ type: "file:failed", jobId, serial, fileName, error });
+  }
+
+  deviceSetup(jobId: string, serial: string, step: SetupStep, message?: string): void {
+    this.emitEvent({ type: "device:setup", jobId, serial, step, message });
+  }
+
+  deviceLog(jobId: string, serial: string, message: string, level: "info" | "success" | "warn" | "error" = "info"): void {
+    this.emitEvent({ type: "device:log", jobId, serial, message, level });
   }
 
   devicePrepared(jobId: string, serial: string): void {

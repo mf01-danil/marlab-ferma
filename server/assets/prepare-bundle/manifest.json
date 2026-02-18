@@ -1,6 +1,17 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "targetDir": "/sdcard/Download/prepare",
+  "wifi": {
+    "ssid": "MarketLab",
+    "password": "0987654321",
+    "security": "wpa2"
+  },
+  "magiskSetup": {
+    "enabled": true,
+    "enableZygisk": true,
+    "connectWifi": true,
+    "rebootAfter": true
+  },
   "files": [
     {
       "name": "scrcpy-server",
@@ -34,6 +45,7 @@
     {
       "name": "KnoxPatch-Enhancer-v0.4-DynamicInstaller.zip",
       "localPath": "files/KnoxPatch-Enhancer-v0.4-DynamicInstaller.zip",
+      "action": "magisk-module",
       "description": "KnoxPatch Enhancer (Magisk module)"
     },
     {
@@ -45,16 +57,19 @@
     {
       "name": "LSPosed-v1.9.2-7024-zygisk-release.zip",
       "localPath": "files/LSPosed-v1.9.2-7024-zygisk-release.zip",
+      "action": "magisk-module",
       "description": "LSPosed Zygisk (Magisk module)"
     },
     {
       "name": "PlayIntegrityFix-inject_s.zip",
       "localPath": "files/PlayIntegrityFix-inject_s.zip",
+      "action": "magisk-module",
       "description": "PlayIntegrityFix (Magisk module)"
     },
     {
       "name": "Proximity-Sensor-Disabler-Magisk-Module-main.zip",
       "localPath": "files/Proximity-Sensor-Disabler-Magisk-Module-main.zip",
+      "action": "magisk-module",
       "description": "Proximity Sensor Disabler (Magisk module)"
     },
     {
@@ -66,11 +81,13 @@
     {
       "name": "Shamiko-v1.2.5-414-release.zip",
       "localPath": "files/Shamiko-v1.2.5-414-release.zip",
+      "action": "magisk-module",
       "description": "Shamiko (Magisk module)"
     },
     {
       "name": "TrickyStore-release.zip",
       "localPath": "files/TrickyStore-release.zip",
+      "action": "magisk-module",
       "description": "TrickyStore (Magisk module)"
     },
     {

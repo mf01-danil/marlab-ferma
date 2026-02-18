@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   CheckCircle2,
   Circle,
@@ -10,6 +10,10 @@ import {
   ChevronRight,
   Download,
   PackageCheck,
+  Wifi,
+  Shield,
+  RotateCcw,
+  Terminal,
 } from "lucide-react";
 import {
   Dialog,
@@ -25,13 +29,28 @@ import {
   usePrepareJob,
   type DeviceProgress,
   type FileProgress,
+  type SetupStep,
+  type LogEntry,
 } from "@/hooks/use-prepare-job";
+import { cn } from "@/lib/utils";
 
 interface PrepareDeviceModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   serials: string[];
 }
+
+const SETUP_STEP_LABELS: Record<SetupStep, string> = {
+  "checking-magisk": "Checking Kitsune Mask...",
+  "connecting-wifi": "Connecting WiFi...",
+  "waiting-internet": "Waiting for internet...",
+  "checking-root": "Checking root...",
+  "awaiting-magisk-update": "Awaiting Magisk update...",
+  "enabling-zygisk": "Enabling Zygisk...",
+  "installing-modules": "Installing modules...",
+  "rebooting": "Rebooting...",
+  "waiting-boot": "Waiting for boot...",
+};
 
 function FileStatusIcon({ status }: { status: FileProgress["status"] }) {
   switch (status) {
@@ -63,6 +82,65 @@ function DeviceStatusIcon({ status }: { status: DeviceProgress["status"] }) {
   }
 }
 
+function SetupStepIcon({ step }: { step: SetupStep }) {
+  switch (step) {
+    case "connecting-wifi":
+    case "waiting-internet":
+      return <Wifi className="size-3 text-primary" />;
+    case "checking-root":
+    case "checking-magisk":
+    case "enabling-zygisk":
+      return <Shield className="size-3 text-primary" />;
+    case "awaiting-magisk-update":
+      return <Shield className="size-3 text-yellow-600 dark:text-yellow-500 animate-pulse" />;
+    case "rebooting":
+    case "waiting-boot":
+      return <RotateCcw className="size-3 text-primary animate-spin" />;
+    default:
+      return <Loader2 className="size-3 text-primary animate-spin" />;
+  }
+}
+
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function LogPanel({ logs }: { logs: LogEntry[] }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs.length]);
+
+  return (
+    <div className="rounded-md border bg-muted/30 font-mono text-[11px] leading-relaxed max-h-[160px] overflow-y-auto p-2">
+      {logs.length === 0 && (
+        <span className="text-muted-foreground">Waiting for events...</span>
+      )}
+      {logs.map((entry, i) => (
+        <div key={i} className="flex gap-1.5">
+          <span className="text-muted-foreground/60 shrink-0">{formatTime(entry.time)}</span>
+          {entry.serial && (
+            <span className="text-muted-foreground shrink-0">[{entry.serial.slice(-6)}]</span>
+          )}
+          <span
+            className={cn(
+              entry.level === "error" && "text-destructive",
+              entry.level === "success" && "text-status-online",
+              entry.level === "warn" && "text-yellow-600 dark:text-yellow-500",
+              entry.level === "info" && "text-foreground/80",
+            )}
+          >
+            {entry.message}
+          </span>
+        </div>
+      ))}
+      <div ref={bottomRef} />
+    </div>
+  );
+}
+
 function DeviceRow({ dp }: { dp: DeviceProgress }) {
   const [expanded, setExpanded] = useState(false);
   const hasFiles = dp.files.length > 0;
@@ -75,6 +153,15 @@ function DeviceRow({ dp }: { dp: DeviceProgress }) {
       >
         <DeviceStatusIcon status={dp.status} />
         <span className="flex-1 font-mono text-xs truncate">{dp.serial}</span>
+        {dp.status === "preparing" && dp.setupStep && (
+          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+            <SetupStepIcon step={dp.setupStep} />
+            <span>{SETUP_STEP_LABELS[dp.setupStep]}</span>
+            {dp.setupMessage && (
+              <span className="text-primary">{dp.setupMessage}</span>
+            )}
+          </span>
+        )}
         {dp.status === "failed" && dp.error && (
           <span className="text-xs text-destructive truncate max-w-[200px]">
             {dp.error}
@@ -111,8 +198,9 @@ export function PrepareDeviceModal({
   onOpenChange,
   serials,
 }: PrepareDeviceModalProps) {
-  const { devices, jobStatus, isRunning, isDone, error, startJob, reset } =
+  const { devices, logs, jobStatus, isRunning, isDone, error, startJob, reset } =
     usePrepareJob();
+  const [showLog, setShowLog] = useState(true);
 
   const handleStart = () => {
     startJob(serials);
@@ -134,9 +222,9 @@ export function PrepareDeviceModal({
           <DialogTitle>Prepare Devices</DialogTitle>
           <DialogDescription>
             {!jobStatus
-              ? `Push files & install APKs on ${serials.length} device${serials.length > 1 ? "s" : ""}.`
+              ? `Push files, install APKs & setup Magisk on ${serials.length} device${serials.length > 1 ? "s" : ""}.`
               : isRunning
-                ? "Pushing files & installing APKs..."
+                ? "Pushing files, installing APKs & configuring Magisk..."
                 : jobStatus === "completed"
                   ? `All ${prepared} device${prepared > 1 ? "s" : ""} prepared successfully.`
                   : `Finished with ${failed} error${failed > 1 ? "s" : ""}.`}
@@ -150,13 +238,27 @@ export function PrepareDeviceModal({
         )}
 
         {deviceList.length > 0 && (
-          <ScrollArea className="max-h-[300px]">
+          <ScrollArea className="max-h-[200px]">
             <div className="rounded-md border">
               {deviceList.map((dp) => (
                 <DeviceRow key={dp.serial} dp={dp} />
               ))}
             </div>
           </ScrollArea>
+        )}
+
+        {(isRunning || isDone) && (
+          <div>
+            <button
+              onClick={() => setShowLog(!showLog)}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1.5"
+            >
+              <Terminal className="size-3" />
+              <span>Log ({logs.length})</span>
+              {showLog ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            </button>
+            {showLog && <LogPanel logs={logs} />}
+          </div>
         )}
 
         {isDone && (
