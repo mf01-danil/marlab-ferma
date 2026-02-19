@@ -1,26 +1,23 @@
 import { Device } from "@/types/device";
 
-export function getApiUrl(): string {
-  if (typeof window !== "undefined") {
-    const saved = localStorage.getItem("marlab_api_url");
-    if (saved) {
-      if (saved.includes("trycloudflare") || saved.includes("ngrok")) {
-        localStorage.removeItem("marlab_api_url");
-      } else {
-        return saved;
-      }
-    }
-    return `${window.location.protocol}//${window.location.hostname}:3001`;
-  }
-  return "http://localhost:3001";
+function isLocal() {
+  return typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 }
 
-export function getWsUrl(): string {
-  return getApiUrl().replace(/^http/, "ws");
+export function getApiBase(): string {
+  return isLocal() ? 'http://localhost:3001' : '';
+}
+
+export function getWsBase(): string {
+  if (typeof window === 'undefined') return 'ws://localhost:3001';
+  if (isLocal()) return 'ws://localhost:3001';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}`;
 }
 
 export async function fetchDevices(): Promise<Device[]> {
-  const res = await fetch(`${getApiUrl()}/api/devices`);
+  const res = await fetch(`${getApiBase()}/api/devices`);
   if (!res.ok) throw new Error("Failed to fetch devices");
   return res.json();
 }

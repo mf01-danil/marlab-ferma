@@ -9,7 +9,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { DeviceInfoPanel } from "@/components/device-detail/device-info-panel";
 import { DeviceActivityTimeline } from "@/components/device-detail/device-activity-timeline";
 import { useDeviceStore } from "@/store/device-store";
-import { useWsUrl } from "@/hooks/use-ws-url";
+import { useDevices } from "@/hooks/use-devices";
+import { getWsBase } from "@/lib/api";
 
 const DeviceScreen = dynamic(
   () => import("@/components/device-detail/device-screen"),
@@ -22,9 +23,11 @@ export default function DeviceDetailPage({
   params: Promise<{ serial: string }>;
 }) {
   const { serial } = use(params);
-  const wsUrl = useWsUrl();
+  // Fetch devices if the store is empty (direct navigation / page reload)
+  useDevices();
   const devices = useDeviceStore((s) => s.devices);
-  const device = devices.find((d) => d.serial === serial);
+  const device  = devices.find((d) => d.serial === serial);
+  const wsBase  = getWsBase();
 
   return (
     <div className="space-y-4">
@@ -45,13 +48,7 @@ export default function DeviceDetailPage({
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
         <Card>
           <CardContent className="p-4">
-            {wsUrl ? (
-              <DeviceScreen serial={serial} wsUrl={wsUrl} />
-            ) : (
-              <div className="flex items-center justify-center h-96 text-muted-foreground">
-                Loading connection...
-              </div>
-            )}
+            <DeviceScreen serial={serial} wsBase={wsBase} />
           </CardContent>
         </Card>
 

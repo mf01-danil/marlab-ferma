@@ -11,7 +11,7 @@ export default function DeviceDetailLoading() {
         </div>
       </div>
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <Skeleton className="h-[500px] rounded-xl" />
+        <Skeleton className="h-[600px] rounded-xl" />
         <div className="space-y-4">
           <Skeleton className="h-[250px] rounded-xl" />
           <Skeleton className="h-[200px] rounded-xl" />

@@ -42,3 +42,9 @@ next-env.d.ts
 
 # prepare bundle binaries (APKs, ZIPs)
 server/assets/prepare-bundle/files/
+
+# scrcpy server jar (downloaded by Dockerfile or manually)
+server/scrcpy-server.jar
+
+# Claude Code config
+.claude/

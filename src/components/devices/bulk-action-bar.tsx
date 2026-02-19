@@ -1,16 +1,12 @@
 "use client";
 
-import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Play, Trash2, Download, ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useDeviceStore } from "@/store/device-store";
-import { PrepareDeviceModal } from "@/components/modals/prepare-device-modal";
-
 export function BulkActionBar() {
   const { selectedIds, clearSelection } = useDeviceStore();
   const count = selectedIds.size;
-  const [prepareOpen, setPrepareOpen] = useState(false);
 
   return (
     <>
@@ -29,15 +25,6 @@ export function BulkActionBar() {
               </span>
               <div className="h-4 w-px bg-border" />
               <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 gap-1.5"
-                  onClick={() => setPrepareOpen(true)}
-                >
-                  <Play className="size-3.5" />
-                  Prepare
-                </Button>
                 <Button variant="ghost" size="sm" className="h-8 gap-1.5">
                   <Download className="size-3.5" />
                   Install APK
@@ -69,11 +56,6 @@ export function BulkActionBar() {
         )}
       </AnimatePresence>
 
-      <PrepareDeviceModal
-        open={prepareOpen}
-        onOpenChange={setPrepareOpen}
-        serials={Array.from(selectedIds)}
-      />
     </>
   );
 }

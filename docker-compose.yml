@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MarLab Ferma — docker-compose
+#
+# Linux (production):
+#   docker-compose up -d
+#   USB devices are accessed via /dev/bus/usb passed into the container.
+#
+# Windows (development):
+#   Run the backend natively: cd server && npm install && node app.js
+#   Docker USB pass-through on Windows requires usbipd-win (complex).
+#   The Next.js frontend always runs natively: npm run dev
+#
+# Cloudflare tunnel runs natively on the host (already configured).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MarLab backend (ADB + scrcpy streaming) ────────────────────────────────
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: marlab-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: 3001
+    # Pass USB bus into container so adb can see the devices
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+    # Required for USB device access
+    privileged: true
+    network_mode: host   # adb forward uses localhost ports; host mode simplifies this
+
+  # ── Next.js frontend ───────────────────────────────────────────────────────
+  frontend:
+    image: node:20-slim
+    container_name: marlab-frontend
+    restart: unless-stopped
+    working_dir: /app
+    # Mount source so hot-reload works in dev; for prod, build a proper image
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+    command: sh -c "npm install && npm run build && npm start"
+    depends_on:
+      - backend

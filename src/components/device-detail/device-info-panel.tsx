@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   Battery,
   Cpu,
@@ -15,7 +14,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { DeviceStatusBadge } from "@/components/devices/device-status-badge";
-import { PrepareDeviceModal } from "@/components/modals/prepare-device-modal";
 import type { Device } from "@/types/device";
 
 interface DeviceInfoPanelProps {
@@ -23,8 +21,6 @@ interface DeviceInfoPanelProps {
 }
 
 export function DeviceInfoPanel({ device }: DeviceInfoPanelProps) {
-  const [prepareOpen, setPrepareOpen] = useState(false);
-
   const specs = [
     { icon: Smartphone, label: "Model", value: device.model || "Unknown" },
     { icon: Cpu, label: "Android", value: device.androidVersion || "—" },
@@ -69,15 +65,6 @@ export function DeviceInfoPanel({ device }: DeviceInfoPanelProps) {
           <CardTitle className="text-base">Actions</CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => setPrepareOpen(true)}
-          >
-            <Play className="size-3.5" />
-            Prepare
-          </Button>
           <Button variant="outline" size="sm" className="gap-1.5">
             <Download className="size-3.5" />
             Install APK
@@ -97,11 +84,6 @@ export function DeviceInfoPanel({ device }: DeviceInfoPanelProps) {
         </CardContent>
       </Card>
 
-      <PrepareDeviceModal
-        open={prepareOpen}
-        onOpenChange={setPrepareOpen}
-        serials={[device.serial]}
-      />
     </div>
   );
 }

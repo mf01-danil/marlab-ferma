@@ -1,315 +1,330 @@
-"use client";
+'use client';
 
-import { useEffect, useRef, useState, useCallback } from "react";
+// ─────────────────────────────────────────────────────────────────────────────
+// DeviceScreen — renders real-time H.264 stream from scrcpy-server via WS.
+// Decodes with WebCodecs (VideoDecoder), requires Chrome 94+ / Edge 94+.
+// ─────────────────────────────────────────────────────────────────────────────
 
-interface Props {
+import { useEffect, useRef, useCallback, useState } from 'react';
+import { Loader2 } from 'lucide-react';
+
+interface DeviceScreenProps {
   serial: string;
-  wsUrl: string;
+  /** Base WebSocket URL, e.g. "ws://localhost:3001" or "wss://marlab-ferma.com" */
+  wsBase: string;
 }
 
-// Parse Annex B H264 stream into individual NAL units (strips start codes)
-function parseAnnexBNALUs(data: Uint8Array): Uint8Array[] {
-  const nalus: Uint8Array[] = [];
-  let i = 0;
-
-  while (i < data.length) {
-    let startCodeLen = 0;
-    if (
-      i + 4 <= data.length &&
-      data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1
-    ) {
-      startCodeLen = 4;
-    } else if (
-      i + 3 <= data.length &&
-      data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1
-    ) {
-      startCodeLen = 3;
-    }
-
-    if (startCodeLen === 0) {
-      i++;
-      continue;
-    }
-
-    const naluStart = i + startCodeLen;
-    let naluEnd = data.length;
-    for (let j = naluStart; j < data.length - 2; j++) {
-      if (
-        data[j] === 0 && data[j + 1] === 0 &&
-        (data[j + 2] === 1 || (data[j + 2] === 0 && j + 3 < data.length && data[j + 3] === 1))
-      ) {
-        naluEnd = j;
-        break;
-      }
-    }
-
-    if (naluStart < naluEnd) {
-      nalus.push(data.slice(naluStart, naluEnd));
-    }
-    i = naluEnd;
-  }
-  return nalus;
+interface StreamMeta {
+  deviceName: string;
+  width: number;
+  height: number;
+  nativeWidth: number;
+  nativeHeight: number;
 }
 
-// Convert Annex B SPS/PPS to avcC configuration record
-function buildAvcC(configData: Uint8Array): Uint8Array {
-  const nalus = parseAnnexBNALUs(configData);
-  const spsList: Uint8Array[] = [];
-  const ppsList: Uint8Array[] = [];
+export default function DeviceScreen({ serial, wsBase }: DeviceScreenProps) {
+  const canvasRef      = useRef<HTMLCanvasElement>(null);
+  const ctxRef         = useRef<CanvasRenderingContext2D | null>(null);
+  const wsRef          = useRef<WebSocket | null>(null);
+  const decoderRef     = useRef<any>(null);
+  const configuredRef  = useRef(false);
+  const needsKeyRef    = useRef(true);  // must receive IDR before decoding delta frames
+  const metaRef        = useRef<StreamMeta | null>(null);
+  // Stores SPS/PPS bytes from scrcpy codec-config frame to prepend before IDR frames
+  const spsFrameRef    = useRef<Uint8Array | null>(null);
 
-  for (const nalu of nalus) {
-    const naluType = nalu[0] & 0x1f;
-    if (naluType === 7) spsList.push(nalu);
-    if (naluType === 8) ppsList.push(nalu);
-  }
+  const [meta,     setMeta]     = useState<StreamMeta | null>(null);
+  const [status,   setStatus]   = useState<'connecting' | 'streaming' | 'error'>('connecting');
+  const [errorMsg, setErrorMsg] = useState('');
 
-  if (spsList.length === 0 || ppsList.length === 0) {
-    throw new Error(`No SPS/PPS found: ${nalus.length} NALUs, types=[${nalus.map(n => n[0] & 0x1f).join(",")}]`);
-  }
+  const dragRef = useRef<{ xP: number; yP: number; t: number } | null>(null);
 
-  const sps = spsList[0];
-  let totalSize = 6;
-  for (const s of spsList) totalSize += 2 + s.length;
-  totalSize += 1;
-  for (const p of ppsList) totalSize += 2 + p.length;
+  // ── Create / recreate VideoDecoder ────────────────────────────────────────
+  const createDecoder = useCallback(() => {
+    try { decoderRef.current?.close(); } catch {}
+    configuredRef.current = false;
 
-  const buf = new Uint8Array(totalSize);
-  const view = new DataView(buf.buffer);
-  let offset = 0;
+    if (!('VideoDecoder' in window)) return;
 
-  buf[offset++] = 1;
-  buf[offset++] = sps[1];
-  buf[offset++] = sps[2];
-  buf[offset++] = sps[3];
-  buf[offset++] = 0xff;
-  buf[offset++] = 0xe0 | spsList.length;
-
-  for (const s of spsList) {
-    view.setUint16(offset, s.length); offset += 2;
-    buf.set(s, offset); offset += s.length;
-  }
-  buf[offset++] = ppsList.length;
-  for (const p of ppsList) {
-    view.setUint16(offset, p.length); offset += 2;
-    buf.set(p, offset); offset += p.length;
-  }
-  return buf;
-}
-
-// Convert Annex B frame data to AVCC format
-function annexBToAvcc(data: Uint8Array): Uint8Array {
-  const nalus = parseAnnexBNALUs(data);
-  if (nalus.length === 0) return data;
-
-  let totalSize = 0;
-  for (const nalu of nalus) totalSize += 4 + nalu.length;
-
-  const result = new Uint8Array(totalSize);
-  const view = new DataView(result.buffer);
-  let offset = 0;
-
-  for (const nalu of nalus) {
-    view.setUint32(offset, nalu.length); offset += 4;
-    result.set(nalu, offset); offset += nalu.length;
-  }
-  return result;
-}
-
-export default function DeviceScreen({ serial, wsUrl }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const decoderRef = useRef<VideoDecoder | null>(null);
-  const [status, setStatus] = useState<string>("Connecting...");
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const [debugLines, setDebugLines] = useState<string[]>([]);
-
-  const addDebug = useCallback((line: string) => {
-    console.log(`[DeviceScreen] ${line}`);
-    setDebugLines((prev) => [...prev.slice(-19), line]);
-  }, []);
-
-  const initDecoder = useCallback(() => {
-    if (decoderRef.current?.state !== "closed") {
-      decoderRef.current?.close();
-    }
-
-    const decoder = new VideoDecoder({
-      output: (frame) => {
+    let frameOutCount = 0;
+    const decoder = new (window as any).VideoDecoder({
+      output: (frame: any) => {
+        const ctx = ctxRef.current;
         const canvas = canvasRef.current;
-        if (!canvas) { frame.close(); return; }
-        canvas.width = frame.displayWidth;
-        canvas.height = frame.displayHeight;
-        const ctx = canvas.getContext("2d");
-        if (ctx) ctx.drawImage(frame, 0, 0);
+        if (ctx && canvas) ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
         frame.close();
+        frameOutCount++;
+        if (frameOutCount === 1) console.log('[DeviceScreen] first frame rendered');
+        setStatus('streaming');
       },
-      error: (err) => {
-        console.error("[decoder] Error:", err);
-        setStatus(`Decoder error: ${err.message}`);
+      error: (e: Error) => {
+        console.log('[DeviceScreen] decoder error:', e.message, '— recreating');
+        createDecoder();
       },
     });
-
     decoderRef.current = decoder;
-    return decoder;
+    console.log('[DeviceScreen] VideoDecoder created');
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+  const cleanup = useCallback(() => {
+    wsRef.current?.close();
+    wsRef.current = null;
+    try { decoderRef.current?.close(); } catch {}
+    decoderRef.current = null;
+    configuredRef.current = false;
+    needsKeyRef.current = true;
+    spsFrameRef.current = null;
   }, []);
 
+  // ── SPS helpers ───────────────────────────────────────────────────────────
+  function findSPS(buf: Uint8Array): Uint8Array | null {
+    for (let i = 0; i < buf.length - 5; i++) {
+      if (buf[i] === 0 && buf[i+1] === 0 && buf[i+2] === 0 && buf[i+3] === 1) {
+        if ((buf[i+4] & 0x1f) === 7) {
+          for (let j = i + 5; j < buf.length - 3; j++) {
+            if (buf[j] === 0 && buf[j+1] === 0 && buf[j+2] === 0 && buf[j+3] === 1) {
+              return buf.slice(i + 4, j);
+            }
+          }
+          return buf.slice(i + 4);
+        }
+      }
+    }
+    return null;
+  }
+
+  function codecFromSPS(sps: Uint8Array): string {
+    if (sps.length < 4) return 'avc1.42E01E';
+    const h = (n: number) => n.toString(16).padStart(2, '0');
+    return `avc1.${h(sps[1])}${h(sps[2])}${h(sps[3])}`;
+  }
+
+  /** Returns true if the buffer contains an IDR slice (NAL type 5). */
+  function hasIDR(buf: Uint8Array): boolean {
+    for (let i = 0; i < buf.length - 4; i++) {
+      if (buf[i] === 0 && buf[i+1] === 0 && buf[i+2] === 0 && buf[i+3] === 1) {
+        if ((buf[i+4] & 0x1f) === 5) return true;
+      }
+    }
+    return false;
+  }
+
+  // ── Configure decoder ─────────────────────────────────────────────────────
+  function configureDecoder(sps: Uint8Array): boolean {
+    const decoder = decoderRef.current;
+    if (!decoder) return false;
+    const m = metaRef.current ?? { width: 720, height: 1280, deviceName: '' };
+    const codec = codecFromSPS(sps);
+    console.log(`[DeviceScreen] configure: ${codec} ${m.width}x${m.height}`);
+    try {
+      decoder.configure({
+        codec,
+        codedWidth:         m.width,
+        codedHeight:        m.height,
+        optimizeForLatency: true,
+      });
+      configuredRef.current = true;
+      needsKeyRef.current   = true; // must wait for IDR before sending delta frames
+      console.log('[DeviceScreen] configured OK');
+      return true;
+    } catch (e: any) {
+      console.log('[DeviceScreen] configure failed:', e?.message);
+      return false;
+    }
+  }
+
+  // ── Feed frame ────────────────────────────────────────────────────────────
+  const feedFrame = useCallback((pts: bigint, data: ArrayBuffer) => {
+    const decoder = decoderRef.current;
+    if (!decoder) return;
+
+    const u8 = new Uint8Array(data);
+
+    if (!configuredRef.current) {
+      const sps = findSPS(u8);
+
+      if (sps) {
+        if (!configureDecoder(sps)) return;
+        // scrcpy sends SPS/PPS as a separate codec-config frame (no IDR).
+        if (!hasIDR(u8)) {
+          spsFrameRef.current = u8; // save for prepending to next IDR
+          return;
+        }
+        // SPS + IDR combined — fall through and decode normally
+      } else {
+        // No SPS in this frame. Try to reconfigure using stored SPS.
+        const stored = spsFrameRef.current;
+        if (!stored) return;
+        const storedSps = findSPS(stored);
+        if (!storedSps) return;
+        // Only proceed if this is an IDR — never send delta right after reconfigure
+        if (!hasIDR(u8)) return;
+        if (!configureDecoder(storedSps)) return;
+        // Fall through — SPS will be prepended below
+      }
+    }
+
+    // After configure we must see an IDR before any delta frames.
+    const isIDR = hasIDR(u8);
+    if (needsKeyRef.current && !isIDR) return; // skip deltas until first IDR
+    if (isIDR) needsKeyRef.current = false;
+
+    // For IDR frames without inline SPS/PPS, prepend the saved ones.
+    let decodeData: ArrayBuffer = data;
+    if (isIDR && spsFrameRef.current && !findSPS(u8)) {
+      const prefix = spsFrameRef.current;
+      const combined = new Uint8Array(prefix.length + u8.length);
+      combined.set(prefix, 0);
+      combined.set(u8, prefix.length);
+      decodeData = combined.buffer;
+    }
+
+    // Clamp to a safe range: negative = codec-config marker, very large = precision loss
+    const MAX_SAFE = 9007199254740991n;
+    const ts = pts < 0n ? 0n : pts > MAX_SAFE ? MAX_SAFE : pts;
+
+    try {
+      decoder.decode(new (window as any).EncodedVideoChunk({
+        type:      isIDR ? 'key' : 'delta',
+        timestamp: Number(ts),
+        data:      decodeData,
+      }));
+    } catch (e: any) {
+      console.log(`[DeviceScreen] decode() threw (ts=${ts}):`, e?.message);
+      configuredRef.current = false;
+      needsKeyRef.current = true;
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    addDebug(`Connecting to ${wsUrl}?serial=${serial}`);
-    const ws = new WebSocket(`${wsUrl}?serial=${encodeURIComponent(serial)}`);
-    ws.binaryType = "arraybuffer";
+    if (!wsBase || !serial) return;
+
+    setStatus('connecting');
+    setMeta(null);
+    metaRef.current = null;
+    configuredRef.current = false;
+    needsKeyRef.current = true;
+
+    if (!('VideoDecoder' in window)) {
+      setErrorMsg('WebCodecs not supported — use Chrome 94+ or Edge 94+');
+      setStatus('error');
+      return;
+    }
+
+    // Init canvas context
+    const canvas = canvasRef.current;
+    ctxRef.current = canvas?.getContext('2d') ?? null;
+
+    // Create decoder
+    createDecoder();
+
+    const url = `${wsBase}/ws/stream?serial=${encodeURIComponent(serial)}`;
+    console.log('[DeviceScreen] connecting to', url);
+    const ws  = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
 
-    let decoder: VideoDecoder | null = null;
-    let configured = false;
-    let frameCount = 0;
+    // Guard: ignore events from a stale WebSocket (React StrictMode opens WS twice)
+    const isActive = () => wsRef.current === ws;
 
-    ws.onopen = () => {
-      addDebug("WebSocket connected");
-      setStatus("Connected, waiting for video...");
-    };
+    ws.onopen  = () => { if (!isActive()) return; console.log('[DeviceScreen] WebSocket open'); };
+    ws.onerror = () => { if (!isActive()) return; setErrorMsg('Connection failed'); setStatus('error'); };
+    ws.onclose = () => { if (!isActive()) return; setStatus('connecting'); };
 
     ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
+      if (!isActive()) return;
+      if (typeof event.data === 'string') {
         try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === "metadata") {
-            setDimensions({ width: msg.width, height: msg.height });
-            setStatus("Receiving video...");
-            addDebug(`Metadata: ${msg.width}x${msg.height}`);
-          } else if (msg.type === "error") {
-            setStatus(`Error: ${msg.message}`);
-            addDebug(`Server error: ${msg.message}`);
+          const msg: any = JSON.parse(event.data);
+          if (msg.type === 'meta') {
+            const m: StreamMeta = {
+              deviceName:   msg.deviceName,
+              width:        msg.width,
+              height:       msg.height,
+              nativeWidth:  msg.nativeWidth  ?? msg.width,
+              nativeHeight: msg.nativeHeight ?? msg.height,
+            };
+            metaRef.current = m;
+            setMeta(m);
+            if (canvas) { canvas.width = m.width; canvas.height = m.height; }
           }
-        } catch { /* ignore */ }
+        } catch {}
         return;
       }
 
-      const data = new Uint8Array(event.data);
-      if (data.length < 13) return;
+      const buf = event.data as ArrayBuffer;
+      if (buf.byteLength < 8) return;
 
-      const frameType = data[0];
-      const view = new DataView(event.data);
-      const pts = view.getFloat64(1);
-      const size = view.getUint32(9);
-      const frameData = data.slice(13, 13 + size);
-      frameCount++;
-
-      if (frameCount <= 5) {
-        addDebug(`Frame#${frameCount}: type=${frameType} size=${size} pts=${pts}`);
-      }
-
-      if (frameType === 1) {
-        try {
-          if (!decoder || decoder.state === "closed") {
-            decoder = initDecoder();
-          }
-
-          const nalus = parseAnnexBNALUs(frameData);
-          addDebug(`NALUs: ${nalus.length} [${nalus.map(n => `type=${n[0] & 0x1f},len=${n.length}`).join(" ")}]`);
-
-          const avcC = buildAvcC(frameData);
-          const sps = nalus.find((n) => (n[0] & 0x1f) === 7);
-          const codecStr = sps
-            ? `avc1.${[sps[1], sps[2], sps[3]].map((b) => b.toString(16).padStart(2, "0")).join("")}`
-            : "avc1.640028";
-
-          addDebug(`Codec: ${codecStr}, avcC: ${avcC.length} bytes`);
-
-          decoder.configure({
-            codec: codecStr,
-            description: avcC,
-            optimizeForLatency: true,
-          });
-
-          configured = true;
-          addDebug(`Decoder configured! state=${decoder.state}`);
-          setStatus("Streaming");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          addDebug(`CONFIG ERROR: ${msg}`);
-          setStatus(`Config error: ${msg}`);
-        }
-        return;
-      }
-
-      if (!configured || !decoder || decoder.state !== "configured") return;
-
-      try {
-        const avccData = annexBToAvcc(frameData);
-        const chunk = new EncodedVideoChunk({
-          type: frameType === 2 ? "key" : "delta",
-          timestamp: pts,
-          data: avccData,
-        });
-        decoder.decode(chunk);
-      } catch (err) {
-        if (frameCount <= 10) {
-          addDebug(`Decode error: ${err instanceof Error ? err.message : err}`);
-        }
-      }
+      const view = new DataView(buf);
+      // Read as signed int64 (scrcpy encodes PTS as int64 big-endian).
+      const pts = (BigInt(view.getInt32(0, false)) << 32n) | BigInt(view.getUint32(4, false));
+      feedFrame(pts, buf.slice(8));
     };
 
-    ws.onclose = (e) => {
-      addDebug(`WebSocket closed: code=${e.code} reason=${e.reason}`);
-      setStatus("Disconnected");
-    };
+    return cleanup;
+  }, [serial, wsBase, cleanup, feedFrame, createDecoder]);
 
-    ws.onerror = () => {
-      addDebug("WebSocket error");
-      setStatus("Connection failed");
-    };
+  // ── Input ─────────────────────────────────────────────────────────────────
+  function send(msg: object) {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  }
 
-    return () => {
-      ws.close();
-      if (decoder && decoder.state !== "closed") decoder.close();
-    };
-  }, [serial, wsUrl, initDecoder, addDebug]);
-
-  const getDeviceCoords = (
-    e: React.MouseEvent<HTMLCanvasElement>
-  ): { x: number; y: number } | null => {
-    const canvas = canvasRef.current;
-    if (!canvas || !dimensions.width || !dimensions.height) return null;
-    const rect = canvas.getBoundingClientRect();
+  // Returns click position as fractions [0..1] of the canvas element size.
+  // The backend converts to device coordinates using hardware touch axis max values.
+  function scaleCoords(e: React.MouseEvent<HTMLCanvasElement>) {
+    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
     return {
-      x: (e.clientX - rect.left) * (dimensions.width / rect.width),
-      y: (e.clientY - rect.top) * (dimensions.height / rect.height),
+      xP: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+      yP: Math.max(0, Math.min(1, (e.clientY - rect.top)  / rect.height)),
     };
+  }
+
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    dragRef.current = { ...scaleCoords(e), t: Date.now() };
   };
 
-  const sendTouch = (action: "down" | "up" | "move", e: React.MouseEvent<HTMLCanvasElement>) => {
-    const coords = getDeviceCoords(e);
-    if (!coords || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ type: "touch", action, x: coords.x, y: coords.y }));
+  const onMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!dragRef.current) return;
+    const { xP: x1P, yP: y1P, t } = dragRef.current;
+    const { xP: x2P, yP: y2P }    = scaleCoords(e);
+    dragRef.current = null;
+    // Tap threshold: movement < 2% of either screen dimension
+    const dist = Math.hypot(x2P - x1P, y2P - y1P);
+    if (dist < 0.02) {
+      send({ type: 'tap', xP: x1P, yP: y1P });
+    } else {
+      send({ type: 'swipe', x1P, y1P, x2P, y2P, duration: Date.now() - t });
+    }
   };
 
-  const [isMouseDown, setIsMouseDown] = useState(false);
-
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-3">
-      <div className="text-sm text-muted-foreground">
-        {status}
-        {dimensions.width > 0 && ` — ${dimensions.width}x${dimensions.height}`}
-      </div>
+    <div
+      className="relative w-full flex items-center justify-center bg-black rounded-lg overflow-hidden"
+      style={{ aspectRatio: meta ? `${meta.width} / ${meta.height}` : '9 / 19.5' }}
+    >
+      {status === 'connecting' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white/60">
+          <Loader2 className="size-6 animate-spin" />
+          <span className="text-sm">Connecting…</span>
+        </div>
+      )}
+      {status === 'error' && (
+        <div className="absolute inset-0 flex items-center justify-center text-red-400 text-sm px-4 text-center">
+          {errorMsg || 'Stream unavailable'}
+        </div>
+      )}
       <canvas
         ref={canvasRef}
-        className="w-full h-auto rounded-lg border border-border cursor-crosshair touch-none"
-        onMouseDown={(e) => { e.preventDefault(); setIsMouseDown(true); sendTouch("down", e); }}
-        onMouseMove={(e) => { if (isMouseDown) sendTouch("move", e); }}
-        onMouseUp={(e) => { setIsMouseDown(false); sendTouch("up", e); }}
-        onMouseLeave={(e) => { if (isMouseDown) { setIsMouseDown(false); sendTouch("up", e); } }}
-        onContextMenu={(e) => e.preventDefault()}
+        className="w-full h-full object-contain cursor-pointer select-none"
+        style={{ display: status === 'streaming' ? 'block' : 'none' }}
+        onMouseDown={onMouseDown}
+        onMouseUp={onMouseUp}
+        onContextMenu={e => e.preventDefault()}
       />
-      {debugLines.length > 0 && (
-        <details className="mt-4" open>
-          <summary className="text-xs text-muted-foreground cursor-pointer">
-            Debug log ({debugLines.length})
-          </summary>
-          <pre className="mt-1 text-[11px] bg-neutral-900 text-green-400 p-3 rounded-md max-h-[300px] overflow-auto whitespace-pre-wrap break-all">
-            {debugLines.join("\n")}
-          </pre>
-        </details>
-      )}
     </div>
   );
 }

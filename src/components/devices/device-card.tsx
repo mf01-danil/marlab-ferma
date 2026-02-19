@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import {
   Smartphone,
@@ -9,7 +8,6 @@ import {
   Trash2,
   Download,
   ImagePlus,
-  Zap,
 } from "lucide-react";
 import {
   Card,
@@ -27,7 +25,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { DeviceStatusBadge } from "./device-status-badge";
 import { useDeviceStore } from "@/store/device-store";
-import { PrepareDeviceModal } from "@/components/modals/prepare-device-modal";
 import type { Device } from "@/types/device";
 import { cn } from "@/lib/utils";
 
@@ -38,8 +35,6 @@ interface DeviceCardProps {
 export function DeviceCard({ device }: DeviceCardProps) {
   const { selectedIds, toggleSelect } = useDeviceStore();
   const isSelected = selectedIds.has(device.serial);
-  const [prepareOpen, setPrepareOpen] = useState(false);
-
   return (
     <>
       <Card
@@ -73,10 +68,6 @@ export function DeviceCard({ device }: DeviceCardProps) {
                   <Play className="mr-2 size-4" />
                   Open Stream
                 </Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setPrepareOpen(true)}>
-                <Zap className="mr-2 size-4" />
-                Prepare
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Download className="mr-2 size-4" />
@@ -128,11 +119,6 @@ export function DeviceCard({ device }: DeviceCardProps) {
         </CardContent>
       </Card>
 
-      <PrepareDeviceModal
-        open={prepareOpen}
-        onOpenChange={setPrepareOpen}
-        serials={[device.serial]}
-      />
     </>
   );
 }
